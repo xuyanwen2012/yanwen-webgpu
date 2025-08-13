@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>WebGPU Shader-F16 Check</title>
+</head>
+
+<body>
+    <pre id="output"></pre>
+
+    <script>
+        function log(...args) {
+            document.getElementById('output').textContent += args.join(' ') + '\n';
+        }
+
+        async function computeF16(device) {
+            // Minimal compute shader using f16
+            const computeShader = `
+                enable f16;
+                
+                @group(0) @binding(0) var<storage, read> input: array<f16>;
+                @group(0) @binding(1) var<storage, read_write> output: array<f16>;
+                
+                @compute @workgroup_size(1)
+                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                    let idx = global_id.x;
+                    
+                    // Read input f16 values
+                    let a: f16 = input[idx * 2];
+                    let b: f16 = input[idx * 2 + 1];
+                    
+                    // Perform f16 arithmetic operations
+                    let sum: f16 = a + b;
+                    let product: f16 = a * b;
+                    let difference: f16 = a - b;
+                    let quotient: f16 = a / b;
+                    
+                    // Write results to output buffer
+                    output[idx * 4] = sum;        // a + b
+                    output[idx * 4 + 1] = product; // a * b
+                    output[idx * 4 + 2] = difference; // a - b
+                    output[idx * 4 + 3] = quotient;   // a / b
+                }
+            `;
+
+            log('Compute shader with f16 created successfully!');
+            log('Shader code:');
+            log(computeShader);
+
+            // Create input and output buffers
+            const inputData = new Float16Array([1.5, 2.3, 4.0, 1.0, 10.0, 2.5]); // 3 pairs of f16 values
+            const outputData = new Float16Array(12); // 3 * 4 results per pair
+
+            const inputBuffer = device.createBuffer({
+                size: inputData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            const outputBuffer = device.createBuffer({
+                size: outputData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            });
+
+            // Create staging buffer for reading results
+            const stagingBuffer = device.createBuffer({
+                size: outputData.byteLength,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+
+            // Upload input data
+            device.queue.writeBuffer(inputBuffer, 0, inputData);
+
+            // Create compute pipeline
+            const computePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: device.createShaderModule({
+                        code: computeShader
+                    }),
+                    entryPoint: 'main'
+                }
+            });
+
+            // Create bind group
+            const bindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    {
+                        binding: 0,
+                        resource: { buffer: inputBuffer }
+                    },
+                    {
+                        binding: 1,
+                        resource: { buffer: outputBuffer }
+                    }
+                ]
+            });
+
+            // Create command encoder and compute pass
+            const commandEncoder = device.createCommandEncoder();
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, bindGroup);
+
+            // Dispatch the compute shader (3 workgroups for 3 pairs of input)
+            computePass.dispatchWorkgroups(3);
+            computePass.end();
+
+            // Copy output to staging buffer for reading
+            commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputData.byteLength);
+
+            // Submit and wait for GPU execution
+            const commandBuffer = commandEncoder.finish();
+            device.queue.submit([commandBuffer]);
+
+            // Wait for GPU to finish
+            await device.queue.onSubmittedWorkDone();
+
+            // Map and read the results
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const results = new Float16Array(stagingBuffer.getMappedRange());
+            // Copy the data before unmapping to avoid detached ArrayBuffer
+            const resultsCopy = new Float16Array(results);
+            stagingBuffer.unmap();
+
+            // Display results
+            log('=== F16 COMPUTE SHADER RESULTS ===');
+            log('Input data:', Array.from(inputData).map(x => x.toFixed(2)).join(', '));
+            log('Raw results array:', Array.from(resultsCopy).map(x => x.toFixed(4)).join(', '));
+            log('');
+            log('Detailed results:');
+            for (let i = 0; i < 3; i++) {
+                const base = i * 4;
+                const a = inputData[i * 2];
+                const b = inputData[i * 2 + 1];
+                log(`  Pair ${i + 1} (${a.toFixed(2)}, ${b.toFixed(2)}):`);
+                log(`    Sum (${a.toFixed(2)} + ${b.toFixed(2)}): ${resultsCopy[base].toFixed(4)}`);
+                log(`    Product (${a.toFixed(2)} * ${b.toFixed(2)}): ${resultsCopy[base + 1].toFixed(4)}`);
+                log(`    Difference (${a.toFixed(2)} - ${b.toFixed(2)}): ${resultsCopy[base + 2].toFixed(4)}`);
+                log(`    Quotient (${a.toFixed(2)} / ${b.toFixed(2)}): ${resultsCopy[base + 3].toFixed(4)}`);
+                log('');
+            }
+
+            // Also log to console for debugging
+            console.log('F16 Results:', resultsCopy);
+            console.log('Input:', inputData);
+
+            log('Compute shader executed successfully on GPU!');
+        }
+
+        async function main() {
+            if (!navigator.gpu?.requestAdapter) {
+                log('WebGPU is NOT available in this browser.');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                log('No GPU adapter found.');
+                return;
+            }
+
+            log('Adapter found: ' + (adapter.info.description || 'Unnamed GPU'));
+
+            // Check if shader-f16 is supported
+            if (adapter.features.has('shader-f16')) {
+                log('shader-f16 is supported');
+
+                // Create device with shader-f16 feature
+                const device = await adapter.requestDevice({
+                    requiredFeatures: ['shader-f16']
+                });
+
+                // Run the f16 compute shader
+                await computeF16(device);
+
+            } else {
+                log('shader-f16 is NOT supported');
+            }
+        }
+
+        main();
+    </script>
+</body>
+
+</html>
