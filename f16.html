@@ -18,58 +18,85 @@
             // Minimal compute shader using f16
             const computeShader = `
                 enable f16;
-                
-                @group(0) @binding(0) var<storage, read> input: array<f16>;
-                @group(0) @binding(1) var<storage, read_write> output: array<f16>;
-                
-                @compute @workgroup_size(1)
-                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-                    let idx = global_id.x;
-                    
-                    // Read input f16 values
-                    let a: f16 = input[idx * 2];
-                    let b: f16 = input[idx * 2 + 1];
-                    
-                    // Perform f16 arithmetic operations
-                    let sum: f16 = a + b;
-                    let product: f16 = a * b;
-                    let difference: f16 = a - b;
-                    let quotient: f16 = a / b;
-                    
-                    // Write results to output buffer
-                    output[idx * 4] = sum;        // a + b
-                    output[idx * 4 + 1] = product; // a * b
-                    output[idx * 4 + 2] = difference; // a - b
-                    output[idx * 4 + 3] = quotient;   // a / b
+
+                const M : u32 = 1024u;
+                const N : u32 = 1024u;
+                const K : u32 = 1024u;
+
+                @group(0) @binding(0) var<storage, read>        A : array<f16>; // len = M*K
+                @group(0) @binding(1) var<storage, read>        B : array<f16>; // len = K*N
+                @group(0) @binding(2) var<storage, read_write>  C : array<f16>; // len = M*N
+
+                @compute @workgroup_size(16, 16, 1)
+                fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+                    // Each thread computes one C[row, col]
+                    let row = gid.y;  // 0..1023
+                    let col = gid.x;  // 0..1023
+
+                    // No bounds checks needed because we will dispatch exactly 1024/16 = 64 groups.
+                    var sum : f16 = 0.0h;
+                    for (var k : u32 = 0u; k < K; k = k + 1u) {
+                        let a = A[row * K + k];
+                        let b = B[k * N + col];
+                        sum = sum + a * b;
+                    }
+                    C[row * N + col] = sum;
                 }
             `;
 
-            log('Compute shader with f16 created successfully!');
-            log('Shader code:');
             log(computeShader);
 
             // Create input and output buffers
-            const inputData = new Float16Array([1.5, 2.3, 4.0, 1.0, 10.0, 2.5]); // 3 pairs of f16 values
-            const outputData = new Float16Array(12); // 3 * 4 results per pair
+            const M = 1024;
+            const N = 1024;
+            const K = 1024;
 
-            const inputBuffer = device.createBuffer({
-                size: inputData.byteLength,
+            const A = new Float16Array(M * K);
+            const B = new Float16Array(K * N);
+            const C = new Float16Array(M * N);
+
+            // Initialize matrices with some test data
+            for (let i = 0; i < M * K; i++) {
+                A[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+            }
+
+            for (let i = 0; i < K * N; i++) {
+                B[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+            }
+
+            for (let i = 0; i < M * N; i++) {
+                C[i] = 0;
+            }
+
+            // peek first 10 elements of A, B, C
+            // log('Matrix A (first 10 elements):', A.slice(0, 10));
+            // log('Matrix B (first 10 elements):', B.slice(0, 10));
+            // log('Matrix C (first 10 elements):', C.slice(0, 10));
+
+            const A_Buffer = device.createBuffer({
+                size: A.byteLength,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
 
-            const outputBuffer = device.createBuffer({
-                size: outputData.byteLength,
+            const B_Buffer = device.createBuffer({
+                size: B.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            const C_Buffer = device.createBuffer({
+                size: C.byteLength,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
             });
 
             // Create staging buffer for reading results
             const stagingBuffer = device.createBuffer({
-                size: outputData.byteLength,
+                size: C.byteLength,
                 usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
             });
 
             // Upload input data
-            device.queue.writeBuffer(inputBuffer, 0, inputData);
+            device.queue.writeBuffer(A_Buffer, 0, A);
+            device.queue.writeBuffer(B_Buffer, 0, B);
 
             // Create compute pipeline
             const computePipeline = device.createComputePipeline({
@@ -88,11 +115,15 @@
                 entries: [
                     {
                         binding: 0,
-                        resource: { buffer: inputBuffer }
+                        resource: { buffer: A_Buffer }
                     },
                     {
                         binding: 1,
-                        resource: { buffer: outputBuffer }
+                        resource: { buffer: B_Buffer }
+                    },
+                    {
+                        binding: 2,
+                        resource: { buffer: C_Buffer }
                     }
                 ]
             });
@@ -103,12 +134,12 @@
             computePass.setPipeline(computePipeline);
             computePass.setBindGroup(0, bindGroup);
 
-            // Dispatch the compute shader (3 workgroups for 3 pairs of input)
-            computePass.dispatchWorkgroups(3);
+            // Dispatch the compute shader (64x64 workgroups for 1024x1024 matrix)
+            computePass.dispatchWorkgroups(64, 64);
             computePass.end();
 
             // Copy output to staging buffer for reading
-            commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputData.byteLength);
+            commandEncoder.copyBufferToBuffer(C_Buffer, 0, stagingBuffer, 0, C.byteLength);
 
             // Submit and wait for GPU execution
             const commandBuffer = commandEncoder.finish();
@@ -124,27 +155,31 @@
             const resultsCopy = new Float16Array(results);
             stagingBuffer.unmap();
 
+
+
             // Display results
-            log('=== F16 COMPUTE SHADER RESULTS ===');
-            log('Input data:', Array.from(inputData).map(x => x.toFixed(2)).join(', '));
-            log('Raw results array:', Array.from(resultsCopy).map(x => x.toFixed(4)).join(', '));
-            log('');
-            log('Detailed results:');
-            for (let i = 0; i < 3; i++) {
-                const base = i * 4;
-                const a = inputData[i * 2];
-                const b = inputData[i * 2 + 1];
-                log(`  Pair ${i + 1} (${a.toFixed(2)}, ${b.toFixed(2)}):`);
-                log(`    Sum (${a.toFixed(2)} + ${b.toFixed(2)}): ${resultsCopy[base].toFixed(4)}`);
-                log(`    Product (${a.toFixed(2)} * ${b.toFixed(2)}): ${resultsCopy[base + 1].toFixed(4)}`);
-                log(`    Difference (${a.toFixed(2)} - ${b.toFixed(2)}): ${resultsCopy[base + 2].toFixed(4)}`);
-                log(`    Quotient (${a.toFixed(2)} / ${b.toFixed(2)}): ${resultsCopy[base + 3].toFixed(4)}`);
-                log('');
+            log('Matrix multiplication completed!');
+            log('Result matrix C (first 10 elements):', resultsCopy.slice(0, 10));
+
+            // Show some sample results from different positions
+            log('C[0,0] =', resultsCopy[0]);
+            log('C[0,1] =', resultsCopy[1]);
+            log('C[1,0] =', resultsCopy[1024]);
+            log('C[1,1] =', resultsCopy[1025]);
+            log('C[100,100] =', resultsCopy[100 * 1024 + 100]);
+
+            // Verify a few results manually
+            let manualCheck = 0;
+            for (let k = 0; k < 10; k++) {
+                manualCheck += A[k] * B[k * 1024];
             }
+            log('Manual verification C[0,0] =', manualCheck);
+            log('GPU result C[0,0] =', resultsCopy[0]);
 
             // Also log to console for debugging
-            console.log('F16 Results:', resultsCopy);
-            console.log('Input:', inputData);
+            log('F16 Results:', resultsCopy);
+            log('Matrix A:', A);
+            log('Matrix B:', B);
 
             log('Compute shader executed successfully on GPU!');
         }
