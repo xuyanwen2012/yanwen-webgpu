@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>WebGPU Shader-F16 Check</title>
+</head>
+
+<body>
+    <pre id="output"></pre>
+
+    <script>
+        function log(...args) {
+            document.getElementById('output').textContent += args.join(' ') + '\n';
+        }
+
+        async function computeSubgroupMatrix(device) {
+            // Minimal compute shader using f16
+            const computeShader = `
+                enable chromium_experimental_subgroup_matrix;
+                enable f16;
+
+
+                @compute @workgroup_size(64, 1, 1)
+                fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(subgroup_id) sid : u32) {
+                    let row = gid.y;  // 0..M-1
+                    let col = gid.x;  // 0..N-1
+
+
+                   var a_left : subgroup_matrix_left<f16, 8, 8>;
+                   var a_right : subgroup_matrix_right<f16, 8, 8>;
+                   var a_result : subgroup_matrix_result<f16, 8, 8>;
+
+
+
+                   a_result = subgroupMatrixMultiply<f16>(a_left, a_right);
+
+
+                }
+            `;
+
+            log(computeShader);
+
+            // Create compute pipeline
+            const computePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: device.createShaderModule({
+                        code: computeShader
+                    }),
+                    entryPoint: 'main'
+                }
+            });
+
+            // Create command encoder and compute pass
+            const commandEncoder = device.createCommandEncoder();
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+
+            // Dispatch the compute shader (16x16 workgroups)
+            computePass.dispatchWorkgroups(16, 16);
+            computePass.end();
+
+            // Submit and wait for GPU execution
+            const commandBuffer = commandEncoder.finish();
+            device.queue.submit([commandBuffer]);
+
+            // Wait for GPU to finish
+            await device.queue.onSubmittedWorkDone();
+
+            log('Compute shader executed successfully on GPU!');
+
+
+        }
+
+        async function main() {
+            if (!navigator.gpu?.requestAdapter) {
+                log('WebGPU is NOT available in this browser.');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                log('No GPU adapter found.');
+                return;
+            }
+
+            log('Adapter found: ' + (adapter.info.description || 'Unnamed GPU'));
+
+            // Check if chromium-experimental-subgroup-matrix is supported
+            if (adapter.features.has(
+                'chromium-experimental-subgroup-matrix',
+                'shader-f16')
+            ) {
+                log('chromium-experimental-subgroup-matrix is supported');
+                // print GPUAdapterInfo.subgroupMaxSize
+                log('subgroupMaxSize: ' + adapter.info.subgroupMaxSize);
+
+                // Create device with shader-f16 feature
+                const device = await adapter.requestDevice({
+                    requiredFeatures: [
+                        'chromium-experimental-subgroup-matrix',
+                        'shader-f16'
+                    ]
+                });
+
+                await computeSubgroupMatrix(device);
+
+            } else {
+                log('chromium-experimental-subgroup-matrix is NOT supported');
+            }
+        }
+
+        main();
+    </script>
+</body>
+
+</html>

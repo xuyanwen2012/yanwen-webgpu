@@ -14,33 +14,58 @@
             document.getElementById('output').textContent += args.join(' ') + '\n';
         }
 
+        // Host-side naive matrix multiplication for validation
+        function naiveMatrixMultiply(A, B, M, N, K) {
+            const C = new Float16Array(M * N);
+
+            for (let i = 0; i < M; i++) {
+                for (let j = 0; j < N; j++) {
+                    let sum = 0;
+                    for (let k = 0; k < K; k++) {
+                        sum += A[i * K + k] * B[k * N + j];
+                    }
+                    C[i * N + j] = sum;
+                }
+            }
+
+            return C;
+        }
+
         async function computeF16(device) {
             // Minimal compute shader using f16
             const computeShader = `
                 enable f16;
 
-                const M : u32 = 1024u;
-                const N : u32 = 1024u;
-                const K : u32 = 1024u;
+                struct MatrixDims {
+                    M : u32,
+                    N : u32,
+                    K : u32,
+                    padding : u32, // Padding for alignment
+                }
 
-                @group(0) @binding(0) var<storage, read>        A : array<f16>; // len = M*K
-                @group(0) @binding(1) var<storage, read>        B : array<f16>; // len = K*N
-                @group(0) @binding(2) var<storage, read_write>  C : array<f16>; // len = M*N
+                @group(0) @binding(0) var<uniform> dims : MatrixDims;
+                @group(0) @binding(1) var<storage, read>        A : array<f16>; // len = M*K
+                @group(0) @binding(2) var<storage, read>        B : array<f16>; // len = K*N
+                @group(0) @binding(3) var<storage, read_write>  C : array<f16>; // len = M*N
 
                 @compute @workgroup_size(16, 16, 1)
                 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
                     // Each thread computes one C[row, col]
-                    let row = gid.y;  // 0..1023
-                    let col = gid.x;  // 0..1023
+                    let row = gid.y;  // 0..M-1
+                    let col = gid.x;  // 0..N-1
 
-                    // No bounds checks needed because we will dispatch exactly 1024/16 = 64 groups.
+                    // Add bounds checking for flexibility
+                    if (row >= dims.M || col >= dims.N) {
+                        return;
+                    }
+
                     var sum : f16 = 0.0h;
-                    for (var k : u32 = 0u; k < K; k = k + 1u) {
-                        let a = A[row * K + k];
-                        let b = B[k * N + col];
+                    for (var k : u32 = 0u; k < dims.K; k = k + 1u) {
+                        let a = A[row * dims.K + k];
+                        let b = B[k * dims.N + col];
                         sum = sum + a * b;
                     }
-                    C[row * N + col] = sum;
+                    C[row * dims.N + col] = sum;
                 }
             `;
 
@@ -55,13 +80,22 @@
             const B = new Float16Array(K * N);
             const C = new Float16Array(M * N);
 
+            // Create uniform buffer for matrix dimensions
+            const dimsData = new Uint32Array([M, N, K, 0]); // 0 is padding
+            const dimsBuffer = device.createBuffer({
+                size: dimsData.byteLength,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+
             // Initialize matrices with some test data
             for (let i = 0; i < M * K; i++) {
-                A[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+                // A[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+                A[i] = 1.0;
             }
 
             for (let i = 0; i < K * N; i++) {
-                B[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+                // B[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+                B[i] = 1.0;
             }
 
             for (let i = 0; i < M * N; i++) {
@@ -95,6 +129,7 @@
             });
 
             // Upload input data
+            device.queue.writeBuffer(dimsBuffer, 0, dimsData);
             device.queue.writeBuffer(A_Buffer, 0, A);
             device.queue.writeBuffer(B_Buffer, 0, B);
 
@@ -115,14 +150,18 @@
                 entries: [
                     {
                         binding: 0,
-                        resource: { buffer: A_Buffer }
+                        resource: { buffer: dimsBuffer }
                     },
                     {
                         binding: 1,
-                        resource: { buffer: B_Buffer }
+                        resource: { buffer: A_Buffer }
                     },
                     {
                         binding: 2,
+                        resource: { buffer: B_Buffer }
+                    },
+                    {
+                        binding: 3,
                         resource: { buffer: C_Buffer }
                     }
                 ]
@@ -141,12 +180,19 @@
             // Copy output to staging buffer for reading
             commandEncoder.copyBufferToBuffer(C_Buffer, 0, stagingBuffer, 0, C.byteLength);
 
+            // auto start = chrono::high_resolution_clock::now();
+            // const start = performance.now();
+
             // Submit and wait for GPU execution
             const commandBuffer = commandEncoder.finish();
             device.queue.submit([commandBuffer]);
 
             // Wait for GPU to finish
             await device.queue.onSubmittedWorkDone();
+
+            // auto end = chrono::high_resolution_clock::now();
+            // const end = performance.now();
+            // log(`GPU computation took ${(end - start).toFixed(2)} ms`);
 
             // Map and read the results
             await stagingBuffer.mapAsync(GPUMapMode.READ);
@@ -158,23 +204,54 @@
 
 
             // Display results
-            log('Matrix multiplication completed!');
-            log('Result matrix C (first 10 elements):', resultsCopy.slice(0, 10));
+            // log('Matrix multiplication completed!');
+            // log('Result matrix C (first 10 elements):', resultsCopy.slice(0, 10));
 
-            // Show some sample results from different positions
-            log('C[0,0] =', resultsCopy[0]);
-            log('C[0,1] =', resultsCopy[1]);
-            log('C[1,0] =', resultsCopy[1024]);
-            log('C[1,1] =', resultsCopy[1025]);
-            log('C[100,100] =', resultsCopy[100 * 1024 + 100]);
+            // // Show some sample results from different positions
+            // log('C[0,0] =', resultsCopy[0]);
+            // log('C[0,1] =', resultsCopy[1]);
+            // log('C[1,0] =', resultsCopy[1024]);
+            // log('C[1,1] =', resultsCopy[1025]);
+            // log('C[100,100] =', resultsCopy[100 * 1024 + 100]);
 
-            // Verify a few results manually
-            let manualCheck = 0;
-            for (let k = 0; k < 10; k++) {
-                manualCheck += A[k] * B[k * 1024];
+            // Compute host-side reference result
+            log('Computing host-side reference...');
+            const startTime = performance.now();
+            const cpuResult = naiveMatrixMultiply(A, B, M, N, K);
+            const endTime = performance.now();
+            log(`Host-side computation took ${(endTime - startTime).toFixed(2)} ms`);
+
+            // Compare GPU and CPU results
+            log('Comparing GPU vs CPU results...');
+            let maxDiff = 0;
+            let totalDiff = 0;
+            let numElements = M * N;
+            let numErrors = 0;
+            const tolerance = 0.1; // Tolerance for f16 precision differences
+
+            for (let i = 0; i < numElements; i++) {
+                const diff = Math.abs(resultsCopy[i] - cpuResult[i]);
+                if (diff > maxDiff) {
+                    maxDiff = diff;
+                }
+                totalDiff += diff;
+                if (diff > tolerance) {
+                    numErrors++;
+                }
             }
-            log('Manual verification C[0,0] =', manualCheck);
-            log('GPU result C[0,0] =', resultsCopy[0]);
+
+            const avgDiff = totalDiff / numElements;
+            log(`Max difference: ${maxDiff.toFixed(6)}`);
+            log(`Average difference: ${avgDiff.toFixed(6)}`);
+            log(`Elements with difference > ${tolerance}: ${numErrors} out of ${numElements}`);
+            log(`Accuracy: ${((numElements - numErrors) / numElements * 100).toFixed(2)}%`);
+
+            // Show some specific comparisons
+            log('Sample comparisons (GPU vs CPU):');
+            log(`C[0,0]: GPU=${resultsCopy[0].toFixed(6)}, CPU=${cpuResult[0].toFixed(6)}, diff=${Math.abs(resultsCopy[0] - cpuResult[0]).toFixed(6)}`);
+            log(`C[0,1]: GPU=${resultsCopy[1].toFixed(6)}, CPU=${cpuResult[1].toFixed(6)}, diff=${Math.abs(resultsCopy[1] - cpuResult[1]).toFixed(6)}`);
+            log(`C[1,0]: GPU=${resultsCopy[1024].toFixed(6)}, CPU=${cpuResult[1024].toFixed(6)}, diff=${Math.abs(resultsCopy[1024] - cpuResult[1024]).toFixed(6)}`);
+            log(`C[100,100]: GPU=${resultsCopy[100 * 1024 + 100].toFixed(6)}, CPU=${cpuResult[100 * 1024 + 100].toFixed(6)}, diff=${Math.abs(resultsCopy[100 * 1024 + 100] - cpuResult[100 * 1024 + 100]).toFixed(6)}`);
 
             // Also log to console for debugging
             log('F16 Results:', resultsCopy);
