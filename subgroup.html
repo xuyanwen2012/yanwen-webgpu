@@ -14,6 +14,21 @@
             document.getElementById('output').textContent += args.join(' ') + '\n';
         }
 
+        function cpuImplementation(A, B, C) {
+            // naive 8x8 matrix multiplication
+            for (let i = 0; i < 8; i++) {
+                for (let j = 0; j < 8; j++) {
+                    C[i * 8 + j] = 0;
+                    for (let k = 0; k < 8; k++) {
+                        C[i * 8 + j] += A[i * 8 + k] * B[k * 8 + j];
+                    }
+                }
+            }
+            
+            log('CPU Results: ' + C);
+        }
+
+
         async function run(device) {
             const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
@@ -23,20 +38,23 @@
                 @group(0) @binding(1) var<storage, read>        B : array<f16>;
                 @group(0) @binding(2) var<storage, read_write>  C : array<f16>;
 
+                const kColMajor : bool = false;  // row-major tiles in memory
+                const kStride   : u32  = 8u;     // elements per row (>= 8 for 8x8)
+
                 @compute @workgroup_size(64, 1, 1)
-                fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(subgroup_id) sid : u32) {
-                   let index = gid.x;
+                fn main(
+                    @builtin(global_invocation_id) gid : vec3<u32>,
+                    @builtin(subgroup_id) sid : u32,
+                ) {
+                    const offset = 0;
 
-                   var a_left : subgroup_matrix_left<f16, 8, 8>;
-                   var a_right : subgroup_matrix_right<f16, 8, 8>;
-                   var a_result : subgroup_matrix_result<f16, 8, 8>;
+                    var L = subgroupMatrixLoad<subgroup_matrix_left<f16, 8, 8>>(&A, offset, kColMajor, kStride);
+                    var R = subgroupMatrixLoad<subgroup_matrix_right<f16, 8, 8>>(&B, offset, kColMajor, kStride);
+                    var ACC : subgroup_matrix_result<f16, 8, 8>;
 
-                   a_result = subgroupMatrixMultiply<f16>(a_left, a_right);
+                    let a_result = subgroupMatrixMultiply<f16>(L, R);
 
-                    let a0 : f16 = A[0];
-                    let b0 : f16 = B[0];
-                    C[0] = 99.0h;
-                    
+                    subgroupMatrixStore(&C, offset, a_result, kColMajor, kStride);
                 }
             `;
 
@@ -47,7 +65,7 @@
             const C = new Float16Array(8 * 8);
 
             for (let i = 0; i < 8 * 8; i++) {
-                A[i] = 1.0;
+                A[i] = i;
                 B[i] = 1.0;
                 C[i] = 0.0;
             }
@@ -139,7 +157,9 @@
             const resultsCopy = new Float16Array(results);
             stagingBuffer.unmap();
 
-            log('Results: ' + resultsCopy);
+            log('GPU Results: ' + resultsCopy);
+
+            cpuImplementation(A, B, C);
         }
 
         async function main() {
