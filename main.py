@@ -13,8 +13,6 @@ import logging
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 import mimetypes
-from datetime import datetime
-import threading
 import signal
 
 # Configure logging
