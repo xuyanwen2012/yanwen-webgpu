@@ -15,6 +15,8 @@
         }
 
         function cpuImplementation(A, B, C) {
+            let start = performance.now();
+
             // naive 8x8 matrix multiplication
             for (let i = 0; i < 8; i++) {
                 for (let j = 0; j < 8; j++) {
@@ -24,12 +26,19 @@
                     }
                 }
             }
-            
+
+            let end = performance.now();
+
+            log('CPU Took: ' + (end - start) + 'ms');
+
             log('CPU Results: ' + C);
         }
 
 
         async function run(device) {
+            // now the tensor size is 8x8
+
+            
             const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
                 enable f16;
@@ -38,8 +47,8 @@
                 @group(0) @binding(1) var<storage, read>        B : array<f16>;
                 @group(0) @binding(2) var<storage, read_write>  C : array<f16>;
 
-                const kColMajor : bool = false;  // row-major tiles in memory
-                const kStride   : u32  = 8u;     // elements per row (>= 8 for 8x8)
+                const kColMajor : bool = false;  
+                const kStride   : u32  = 8u;     
 
                 @compute @workgroup_size(64, 1, 1)
                 fn main(
@@ -52,7 +61,8 @@
                     var R = subgroupMatrixLoad<subgroup_matrix_right<f16, 8, 8>>(&B, offset, kColMajor, kStride);
                     var ACC : subgroup_matrix_result<f16, 8, 8>;
 
-                    let a_result = subgroupMatrixMultiply<f16>(L, R);
+                    // let a_result = subgroupMatrixMultiply<f16>(L, R);
+                    let a_result = subgroupMatrixMultiplyAccumulate(L, R, ACC);
 
                     subgroupMatrixStore(&C, offset, a_result, kColMajor, kStride);
                 }
@@ -144,10 +154,13 @@
             const commandBuffer = commandEncoder.finish();
             device.queue.submit([commandBuffer]);
 
-            // Wait for GPU to finish
+            let start = performance.now();
+
             await device.queue.onSubmittedWorkDone();
 
-            log('Compute shader executed successfully on GPU!');
+            let end = performance.now();
+
+            log('Compute shader executed successfully on GPU! ' + (end - start) + 'ms');
 
             // Map and read the results
             await stagingBuffer.mapAsync(GPUMapMode.READ);
