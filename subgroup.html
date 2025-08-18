@@ -15,7 +15,6 @@
         }
 
         async function run(device) {
-            // Minimal compute shader using f16
             const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
                 enable f16;
@@ -135,14 +134,12 @@
             // Map and read the results
             await stagingBuffer.mapAsync(GPUMapMode.READ);
             const results = new Float16Array(stagingBuffer.getMappedRange());
-            
+
             // Copy the data before unmapping to avoid detached ArrayBuffer
             const resultsCopy = new Float16Array(results);
             stagingBuffer.unmap();
 
             log('Results: ' + resultsCopy);
-
-
         }
 
         async function main() {
