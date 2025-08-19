@@ -1,47 +1,47 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>WebGPU Shader-F16 Check</title>
-  </head>
 
-  <body>
-    <pre id="output"></pre>
+<head>
+  <meta charset="UTF-8" />
+  <title>WebGPU Shader-F16 Check</title>
+</head>
 
-    <script>
-      function log(...args) {
-        document.getElementById("output").textContent += args.join(" ") + "\n";
+<body>
+  <pre id="output"></pre>
+
+  <script>
+    function log(...args) {
+      document.getElementById("output").textContent += args.join(" ") + "\n";
+    }
+
+    async function main() {
+      if (!navigator.gpu?.requestAdapter) {
+        log("WebGPU is NOT available in this browser.");
+        return;
       }
 
-      async function main() {
-        if (!navigator.gpu?.requestAdapter) {
-          log("WebGPU is NOT available in this browser.");
-          return;
-        }
-
-        const adapter = await navigator.gpu.requestAdapter();
-        if (!adapter) {
-          log("No GPU adapter found.");
-          return;
-        }
-
-        // console.log(adapter);
-
-        log("Adapter found: " + (adapter.info.description || "Unnamed GPU"));
-
-        for (const feature of adapter.features) {
-          console.log(feature);
-        }
-
-        // Check if shader-f16 is supported
-        if (adapter.features.has("shader-f16")) {
-          log("shader-f16 is supported");
-        } else {
-          log("shader-f16 is NOT supported");
-        }
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        log("No GPU adapter found.");
+        return;
       }
 
-      main();
-    </script>
-  </body>
+      log("Adapter found: " + (adapter.info.description || "Unnamed GPU"));
+
+      for (const feature of adapter.features) {
+        console.log(feature);
+      }
+
+      // Check if shader-f16 is supported
+      if (adapter.features.has("shader-f16")) {
+        log("shader-f16 is supported");
+      } else {
+        log("shader-f16 is NOT supported");
+      }
+    }
+
+    main();
+  </script>
+</body>
+
 </html>

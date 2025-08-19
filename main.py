@@ -6,7 +6,6 @@ A more feature-rich alternative to python3 -m http.server
 
 import http.server
 import socketserver
-import os
 import sys
 import argparse
 import logging
