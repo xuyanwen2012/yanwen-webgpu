@@ -45,9 +45,25 @@
 
 
         async function run(device) {
-            // now the tensor size is 8x8
+            // We assume square matrix for now
 
+            // N = number of columns/rows in the full matrix (your stride)
+            // e.g., 
+            // A,B are 16x16, then N = 16
 
+            // TILE_SIZE = hardware specific in X/Y direction 
+            // e.g., 
+            // TILE_SIZE = 8, Apple M4
+
+            // in above example, 
+            // our tile_row will iterate from 0 to 1 (two tiles in Y)
+            // our tile_col will iterate from 0 to 1 (two tiles in X)
+
+            // offsets should be (tile_row * N * TILE_SIZE) + (tile_col * TILE_SIZE);
+            // tile(0, 0) = 0 * 16 * 8 + 0 * 8 = 0
+            // tile(0, 1) = 0 * 16 * 8 + 1 * 8 = 8
+            // tile(1, 0) = 1 * 16 * 8 + 0 * 8 = 128
+            // tile(1, 1) = 1 * 16 * 8 + 1 * 8 = 136
 
             const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
@@ -70,54 +86,36 @@
                 ) {
                     const offset = 0;
 
-                    // var ACC : subgroup_matrix_result<f16, 8, 8>;
-                    // var L = subgroupMatrixLoad<subgroup_matrix_left<f16, 8, 8>>(&A, offset, kColMajor, kStride);
-                    // var R = subgroupMatrixLoad<subgroup_matrix_right<f16, 8, 8>>(&B, offset, kColMajor, kStride);
-                    // ACC = subgroupMatrixMultiplyAccumulate(L, R, ACC);
+                    const N : u32 = 16u;
+                    const TILE_SIZE : u32 = 8u;
 
-                    // use A and B to prevent from optimizing out
-                    var A_copy = A[0];
-                    var B_copy = B[0];
-                    
-                    var something = subgroupMatrixLoad<subgroup_matrix_left<f16, 8, 8>>(&A, offset, kColMajor, kStride);
-                    // subgroupMatrixStore(&C, offset + 0, something, kColMajor, kStride);
-                    // subgroupMatrixStore(&C, offset + 8, something, kColMajor, kStride);
-                    // subgroupMatrixStore(&C, offset + 1 * 16 * 8 + 0, something, kColMajor, kStride);
-                    // subgroupMatrixStore(&C, offset + 1 * 16 * 8 + 8, something, kColMajor, kStride);
+                    // inferred from above, N / TILE_SIZE
+                    const TILES_Y : u32 = 2u; 
+                    const TILES_X : u32 = 2u;
+                    const TILES_K : u32 = 2u;
 
+                    for (var tile_row = 0u; tile_row < TILES_Y; tile_row++) {
+                        for (var tile_col = 0u; tile_col < TILES_X; tile_col++) {
 
+                            var ACC : subgroup_matrix_result<f16, 8, 8>;
 
-                    // We assume square matrix for now
+                            for (var k_tile = 0u; k_tile < TILES_K; k_tile++) {
 
-                    // N = number of columns/rows in the full matrix (your stride)
-                    // e.g., 
-                    // A,B are 16x16, then N = 16
+                                // Load A tile: A[tile_row, k_tile]
+                                let a_offset = u32(tile_row * N * TILE_SIZE + k_tile * TILE_SIZE);
+                                var L = subgroupMatrixLoad<subgroup_matrix_left<f16, 8, 8>>(&A, a_offset, kColMajor, N);
 
-                    // TILE_SIZE = hardware specific in X/Y direction 
-                    // e.g., 
-                    // TILE_SIZE = 8, Apple M4
-                    
-                    // in above example, 
-                    // our tile_row will iterate from 0 to 1 (two tiles in Y)
-                    // our tile_col will iterate from 0 to 1 (two tiles in X)
+                                // Load B tile: B[k_tile, tile_col]
+                                let b_offset = u32(k_tile * N * TILE_SIZE + tile_col * TILE_SIZE);
+                                var R = subgroupMatrixLoad<subgroup_matrix_right<f16, 8, 8>>(&B, b_offset, kColMajor, N);
 
-                    // offsets should be (tile_row * N * TILE_SIZE) + (tile_col * TILE_SIZE);
-                    // tile(0, 0) = 0 * 16 * 8 + 0 * 8 = 0
-                    // tile(0, 1) = 0 * 16 * 8 + 1 * 8 = 8
-                    // tile(1, 0) = 1 * 16 * 8 + 0 * 8 = 128
-                    // tile(1, 1) = 1 * 16 * 8 + 1 * 8 = 136
+                                ACC = subgroupMatrixMultiplyAccumulate(L, R, ACC);
+                            }
 
-                    const TILE_SIZE = 8;
-                    const N = 16;
-                    
-                    // inferred from above
-                    const TILES_X = N / TILE_SIZE;
-                    const TILES_Y = N / TILE_SIZE;
+                            // Store the result
+                            let c_offset = u32(tile_row * N * TILE_SIZE) + u32(tile_col * TILE_SIZE);
+                            subgroupMatrixStore(&C, c_offset, ACC, kColMajor, N);
 
-                    for (var tile_row = 0; tile_row < TILES_Y; tile_row++) {
-                        for (var tile_col = 0; tile_col < TILES_X; tile_col++) {
-                            let offset = u32((tile_row * N * TILE_SIZE) + (tile_col * TILE_SIZE));
-                            subgroupMatrixStore(&C, offset, something, kColMajor, kStride);
                         }
                     }
                 }
