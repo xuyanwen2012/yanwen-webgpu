@@ -1,45 +1,42 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
-    <meta charset="UTF-8">
+  <head>
+    <meta charset="UTF-8" />
     <title>WebGPU Subgroup Matrix</title>
-</head>
+  </head>
 
-<body>
+  <body>
     <pre id="output"></pre>
 
     <script>
-        function log(...args) {
-            document.getElementById('output').textContent += args.join(' ') + '\n';
-        }
+      function log(...args) {
+        document.getElementById("output").textContent += args.join(" ") + "\n";
+      }
 
-        function cpuImplementation(A, B, C) {
-            let start = performance.now();
+      function cpuImplementation(A, B, C) {
+        let start = performance.now();
 
-            // naive 8x8 matrix multiplication
-            for (let i = 0; i < 8; i++) {
-                for (let j = 0; j < 8; j++) {
-                    C[i * 8 + j] = 0;
-                    for (let k = 0; k < 8; k++) {
-                        C[i * 8 + j] += A[i * 8 + k] * B[k * 8 + j];
-                    }
-                }
+        // naive 8x8 matrix multiplication
+        for (let i = 0; i < 8; i++) {
+          for (let j = 0; j < 8; j++) {
+            C[i * 8 + j] = 0;
+            for (let k = 0; k < 8; k++) {
+              C[i * 8 + j] += A[i * 8 + k] * B[k * 8 + j];
             }
-
-            let end = performance.now();
-
-            log('CPU Took: ' + (end - start) + 'ms');
-
-            log('CPU Results: ' + C);
+          }
         }
 
+        let end = performance.now();
 
-        async function run(device) {
-            // now the tensor size is 8x8
+        log("CPU Took: " + (end - start) + "ms");
 
-            
-            const computeShader = `
+        log("CPU Results: " + C);
+      }
+
+      async function run(device) {
+        // now the tensor size is 8x8
+
+        const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
                 enable f16;
 
@@ -68,144 +65,151 @@
                 }
             `;
 
-            log(computeShader);
+        log(computeShader);
 
-            const A = new Float16Array(8 * 8);
-            const B = new Float16Array(8 * 8);
-            const C = new Float16Array(8 * 8);
+        const A = new Float16Array(8 * 8);
+        const B = new Float16Array(8 * 8);
+        const C = new Float16Array(8 * 8);
 
-            for (let i = 0; i < 8 * 8; i++) {
-                A[i] = i;
-                B[i] = 1.0;
-                C[i] = 0.0;
-            }
-
-            const A_Buffer = device.createBuffer({
-                size: A.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-
-            const B_Buffer = device.createBuffer({
-                size: B.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-
-            const C_Buffer = device.createBuffer({
-                size: C.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-            });
-
-            // Create staging buffer for reading results
-            const stagingBuffer = device.createBuffer({
-                size: C.byteLength,
-                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-            });
-
-            device.queue.writeBuffer(A_Buffer, 0, A);
-            device.queue.writeBuffer(B_Buffer, 0, B);
-
-
-
-            // Create compute pipeline
-            const computePipeline = device.createComputePipeline({
-                layout: 'auto',
-                compute: {
-                    module: device.createShaderModule({
-                        code: computeShader
-                    }),
-                    entryPoint: 'main'
-                }
-            });
-
-            // Create bind group
-
-            const bindGroup = device.createBindGroup({
-                layout: computePipeline.getBindGroupLayout(0),
-                entries: [
-                    {
-                        binding: 0,
-                        resource: { buffer: A_Buffer }
-                    },
-                    {
-                        binding: 1,
-                        resource: { buffer: B_Buffer }
-                    },
-                    {
-                        binding: 2,
-                        resource: { buffer: C_Buffer }
-                    }
-                ]
-            });
-
-            // Create command encoder and compute pass
-            const commandEncoder = device.createCommandEncoder();
-            const computePass = commandEncoder.beginComputePass();
-            computePass.setPipeline(computePipeline);
-            computePass.setBindGroup(0, bindGroup);
-
-            // Dispatch the compute shader 
-            computePass.dispatchWorkgroups(1);
-            computePass.end();
-
-            // Copy output to staging buffer for reading
-            commandEncoder.copyBufferToBuffer(C_Buffer, 0, stagingBuffer, 0, C.byteLength);
-
-            // Submit and wait for GPU execution
-            const commandBuffer = commandEncoder.finish();
-            device.queue.submit([commandBuffer]);
-
-            let start = performance.now();
-
-            await device.queue.onSubmittedWorkDone();
-
-            let end = performance.now();
-
-            log('Compute shader executed successfully on GPU! ' + (end - start) + 'ms');
-
-            // Map and read the results
-            await stagingBuffer.mapAsync(GPUMapMode.READ);
-            const results = new Float16Array(stagingBuffer.getMappedRange());
-
-            // Copy the data before unmapping to avoid detached ArrayBuffer
-            const resultsCopy = new Float16Array(results);
-            stagingBuffer.unmap();
-
-            log('GPU Results: ' + resultsCopy);
-
-            cpuImplementation(A, B, C);
+        for (let i = 0; i < 8 * 8; i++) {
+          A[i] = i;
+          B[i] = 1.0;
+          C[i] = 0.0;
         }
 
-        async function main() {
-            if (!navigator.gpu?.requestAdapter) {
-                log('WebGPU is NOT available in this browser.');
-                return;
-            }
+        const A_Buffer = device.createBuffer({
+          size: A.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
 
-            const adapter = await navigator.gpu.requestAdapter();
-            if (!adapter) {
-                log('No GPU adapter found.');
-                return;
-            }
+        const B_Buffer = device.createBuffer({
+          size: B.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
 
-            log('Adapter found: ' + (adapter.info.description || 'Unnamed GPU'));
+        const C_Buffer = device.createBuffer({
+          size: C.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
 
-            const requiredFeatures = [
-                'chromium-experimental-subgroup-matrix',
-                'shader-f16'
-            ];
+        // Create staging buffer for reading results
+        const stagingBuffer = device.createBuffer({
+          size: C.byteLength,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
 
-            if (!requiredFeatures.every(f => adapter.features.has(f))) {
-                log('Missing required features:', requiredFeatures.join(', '));
-                return;
-            }
+        device.queue.writeBuffer(A_Buffer, 0, A);
+        device.queue.writeBuffer(B_Buffer, 0, B);
 
-            const device = await adapter.requestDevice({ requiredFeatures });
-            log('Running...');
-            await run(device);
+        // Create compute pipeline
+        const computePipeline = device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({
+              code: computeShader,
+            }),
+            entryPoint: "main",
+          },
+        });
+
+        // Create bind group
+
+        const bindGroup = device.createBindGroup({
+          layout: computePipeline.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: { buffer: A_Buffer },
+            },
+            {
+              binding: 1,
+              resource: { buffer: B_Buffer },
+            },
+            {
+              binding: 2,
+              resource: { buffer: C_Buffer },
+            },
+          ],
+        });
+
+        // Create command encoder and compute pass
+        const commandEncoder = device.createCommandEncoder();
+        const computePass = commandEncoder.beginComputePass();
+        computePass.setPipeline(computePipeline);
+        computePass.setBindGroup(0, bindGroup);
+
+        // Dispatch the compute shader
+        computePass.dispatchWorkgroups(1);
+        computePass.end();
+
+        // Copy output to staging buffer for reading
+        commandEncoder.copyBufferToBuffer(
+          C_Buffer,
+          0,
+          stagingBuffer,
+          0,
+          C.byteLength,
+        );
+
+        // Submit and wait for GPU execution
+        const commandBuffer = commandEncoder.finish();
+        device.queue.submit([commandBuffer]);
+
+        let start = performance.now();
+
+        await device.queue.onSubmittedWorkDone();
+
+        let end = performance.now();
+
+        log(
+          "Compute shader executed successfully on GPU! " +
+            (end - start) +
+            "ms",
+        );
+
+        // Map and read the results
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const results = new Float16Array(stagingBuffer.getMappedRange());
+
+        // Copy the data before unmapping to avoid detached ArrayBuffer
+        const resultsCopy = new Float16Array(results);
+        stagingBuffer.unmap();
+
+        log("GPU Results: " + resultsCopy);
+
+        cpuImplementation(A, B, C);
+      }
+
+      async function main() {
+        if (!navigator.gpu?.requestAdapter) {
+          log("WebGPU is NOT available in this browser.");
+          return;
         }
 
-        main();
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          log("No GPU adapter found.");
+          return;
+        }
+
+        log("Adapter found: " + (adapter.info.description || "Unnamed GPU"));
+
+        const requiredFeatures = [
+          "chromium-experimental-subgroup-matrix",
+          "shader-f16",
+        ];
+
+        if (!requiredFeatures.every((f) => adapter.features.has(f))) {
+          log("Missing required features:", requiredFeatures.join(", "));
+          return;
+        }
+
+        const device = await adapter.requestDevice({ requiredFeatures });
+        log("Running...");
+        await run(device);
+      }
+
+      main();
     </script>
-</body>
-
+  </body>
 </html>

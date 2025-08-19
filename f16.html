@@ -1,39 +1,38 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
-    <meta charset="UTF-8">
+  <head>
+    <meta charset="UTF-8" />
     <title>WebGPU Shader-F16 Check</title>
-</head>
+  </head>
 
-<body>
+  <body>
     <pre id="output"></pre>
 
     <script>
-        function log(...args) {
-            document.getElementById('output').textContent += args.join(' ') + '\n';
-        }
+      function log(...args) {
+        document.getElementById("output").textContent += args.join(" ") + "\n";
+      }
 
-        // Host-side naive matrix multiplication for validation
-        function naiveMatrixMultiply(A, B, M, N, K) {
-            const C = new Float16Array(M * N);
+      // Host-side naive matrix multiplication for validation
+      function naiveMatrixMultiply(A, B, M, N, K) {
+        const C = new Float16Array(M * N);
 
-            for (let i = 0; i < M; i++) {
-                for (let j = 0; j < N; j++) {
-                    let sum = 0;
-                    for (let k = 0; k < K; k++) {
-                        sum += A[i * K + k] * B[k * N + j];
-                    }
-                    C[i * N + j] = sum;
-                }
+        for (let i = 0; i < M; i++) {
+          for (let j = 0; j < N; j++) {
+            let sum = 0;
+            for (let k = 0; k < K; k++) {
+              sum += A[i * K + k] * B[k * N + j];
             }
-
-            return C;
+            C[i * N + j] = sum;
+          }
         }
 
-        async function computeF16(device) {
-            // Minimal compute shader using f16
-            const computeShader = `
+        return C;
+      }
+
+      async function computeF16(device) {
+        // Minimal compute shader using f16
+        const computeShader = `
                 enable f16;
 
                 struct MatrixDims {
@@ -69,231 +68,247 @@
                 }
             `;
 
-            log(computeShader);
+        log(computeShader);
 
-            // Create input and output buffers
-            const M = 1024;
-            const N = 1024;
-            const K = 1024;
+        // Create input and output buffers
+        const M = 1024;
+        const N = 1024;
+        const K = 1024;
 
-            const A = new Float16Array(M * K);
-            const B = new Float16Array(K * N);
-            const C = new Float16Array(M * N);
+        const A = new Float16Array(M * K);
+        const B = new Float16Array(K * N);
+        const C = new Float16Array(M * N);
 
-            // Create uniform buffer for matrix dimensions
-            const dimsData = new Uint32Array([M, N, K, 0]); // 0 is padding
-            const dimsBuffer = device.createBuffer({
-                size: dimsData.byteLength,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
+        // Create uniform buffer for matrix dimensions
+        const dimsData = new Uint32Array([M, N, K, 0]); // 0 is padding
+        const dimsBuffer = device.createBuffer({
+          size: dimsData.byteLength,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
 
-            // Initialize matrices with some test data
-            for (let i = 0; i < M * K; i++) {
-                // A[i] = Math.random() * 2 - 1; // Random values between -1 and 1
-                A[i] = 1.0;
-            }
-
-            for (let i = 0; i < K * N; i++) {
-                // B[i] = Math.random() * 2 - 1; // Random values between -1 and 1
-                B[i] = 1.0;
-            }
-
-            for (let i = 0; i < M * N; i++) {
-                C[i] = 0;
-            }
-
-            // peek first 10 elements of A, B, C
-            // log('Matrix A (first 10 elements):', A.slice(0, 10));
-            // log('Matrix B (first 10 elements):', B.slice(0, 10));
-            // log('Matrix C (first 10 elements):', C.slice(0, 10));
-
-            const A_Buffer = device.createBuffer({
-                size: A.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-
-            const B_Buffer = device.createBuffer({
-                size: B.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-
-            const C_Buffer = device.createBuffer({
-                size: C.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-            });
-
-            // Create staging buffer for reading results
-            const stagingBuffer = device.createBuffer({
-                size: C.byteLength,
-                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-            });
-
-            // Upload input data
-            device.queue.writeBuffer(dimsBuffer, 0, dimsData);
-            device.queue.writeBuffer(A_Buffer, 0, A);
-            device.queue.writeBuffer(B_Buffer, 0, B);
-
-            // Create compute pipeline
-            const computePipeline = device.createComputePipeline({
-                layout: 'auto',
-                compute: {
-                    module: device.createShaderModule({
-                        code: computeShader
-                    }),
-                    entryPoint: 'main'
-                }
-            });
-
-            // Create bind group
-            const bindGroup = device.createBindGroup({
-                layout: computePipeline.getBindGroupLayout(0),
-                entries: [
-                    {
-                        binding: 0,
-                        resource: { buffer: dimsBuffer }
-                    },
-                    {
-                        binding: 1,
-                        resource: { buffer: A_Buffer }
-                    },
-                    {
-                        binding: 2,
-                        resource: { buffer: B_Buffer }
-                    },
-                    {
-                        binding: 3,
-                        resource: { buffer: C_Buffer }
-                    }
-                ]
-            });
-
-            // Create command encoder and compute pass
-            const commandEncoder = device.createCommandEncoder();
-            const computePass = commandEncoder.beginComputePass();
-            computePass.setPipeline(computePipeline);
-            computePass.setBindGroup(0, bindGroup);
-
-            // Dispatch the compute shader (64x64 workgroups for 1024x1024 matrix)
-            computePass.dispatchWorkgroups(64, 64);
-            computePass.end();
-
-            // Copy output to staging buffer for reading
-            commandEncoder.copyBufferToBuffer(C_Buffer, 0, stagingBuffer, 0, C.byteLength);
-
-            // auto start = chrono::high_resolution_clock::now();
-            // const start = performance.now();
-
-            // Submit and wait for GPU execution
-            const commandBuffer = commandEncoder.finish();
-            device.queue.submit([commandBuffer]);
-
-            // Wait for GPU to finish
-            await device.queue.onSubmittedWorkDone();
-
-            // auto end = chrono::high_resolution_clock::now();
-            // const end = performance.now();
-            // log(`GPU computation took ${(end - start).toFixed(2)} ms`);
-
-            // Map and read the results
-            await stagingBuffer.mapAsync(GPUMapMode.READ);
-            const results = new Float16Array(stagingBuffer.getMappedRange());
-            // Copy the data before unmapping to avoid detached ArrayBuffer
-            const resultsCopy = new Float16Array(results);
-            stagingBuffer.unmap();
-
-
-
-            // Display results
-            // log('Matrix multiplication completed!');
-            // log('Result matrix C (first 10 elements):', resultsCopy.slice(0, 10));
-
-            // // Show some sample results from different positions
-            // log('C[0,0] =', resultsCopy[0]);
-            // log('C[0,1] =', resultsCopy[1]);
-            // log('C[1,0] =', resultsCopy[1024]);
-            // log('C[1,1] =', resultsCopy[1025]);
-            // log('C[100,100] =', resultsCopy[100 * 1024 + 100]);
-
-            // Compute host-side reference result
-            log('Computing host-side reference...');
-            const startTime = performance.now();
-            const cpuResult = naiveMatrixMultiply(A, B, M, N, K);
-            const endTime = performance.now();
-            log(`Host-side computation took ${(endTime - startTime).toFixed(2)} ms`);
-
-            // Compare GPU and CPU results
-            log('Comparing GPU vs CPU results...');
-            let maxDiff = 0;
-            let totalDiff = 0;
-            let numElements = M * N;
-            let numErrors = 0;
-            const tolerance = 0.1; // Tolerance for f16 precision differences
-
-            for (let i = 0; i < numElements; i++) {
-                const diff = Math.abs(resultsCopy[i] - cpuResult[i]);
-                if (diff > maxDiff) {
-                    maxDiff = diff;
-                }
-                totalDiff += diff;
-                if (diff > tolerance) {
-                    numErrors++;
-                }
-            }
-
-            const avgDiff = totalDiff / numElements;
-            log(`Max difference: ${maxDiff.toFixed(6)}`);
-            log(`Average difference: ${avgDiff.toFixed(6)}`);
-            log(`Elements with difference > ${tolerance}: ${numErrors} out of ${numElements}`);
-            log(`Accuracy: ${((numElements - numErrors) / numElements * 100).toFixed(2)}%`);
-
-            // Show some specific comparisons
-            log('Sample comparisons (GPU vs CPU):');
-            log(`C[0,0]: GPU=${resultsCopy[0].toFixed(6)}, CPU=${cpuResult[0].toFixed(6)}, diff=${Math.abs(resultsCopy[0] - cpuResult[0]).toFixed(6)}`);
-            log(`C[0,1]: GPU=${resultsCopy[1].toFixed(6)}, CPU=${cpuResult[1].toFixed(6)}, diff=${Math.abs(resultsCopy[1] - cpuResult[1]).toFixed(6)}`);
-            log(`C[1,0]: GPU=${resultsCopy[1024].toFixed(6)}, CPU=${cpuResult[1024].toFixed(6)}, diff=${Math.abs(resultsCopy[1024] - cpuResult[1024]).toFixed(6)}`);
-            log(`C[100,100]: GPU=${resultsCopy[100 * 1024 + 100].toFixed(6)}, CPU=${cpuResult[100 * 1024 + 100].toFixed(6)}, diff=${Math.abs(resultsCopy[100 * 1024 + 100] - cpuResult[100 * 1024 + 100]).toFixed(6)}`);
-
-            // Also log to console for debugging
-            log('F16 Results:', resultsCopy);
-            log('Matrix A:', A);
-            log('Matrix B:', B);
-
-            log('Compute shader executed successfully on GPU!');
+        // Initialize matrices with some test data
+        for (let i = 0; i < M * K; i++) {
+          // A[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+          A[i] = 1.0;
         }
 
-        async function main() {
-            if (!navigator.gpu?.requestAdapter) {
-                log('WebGPU is NOT available in this browser.');
-                return;
-            }
-
-            const adapter = await navigator.gpu.requestAdapter();
-            if (!adapter) {
-                log('No GPU adapter found.');
-                return;
-            }
-
-            log('Adapter found: ' + (adapter.info.description || 'Unnamed GPU'));
-
-            // Check if shader-f16 is supported
-            if (adapter.features.has('shader-f16')) {
-                log('shader-f16 is supported');
-
-                // Create device with shader-f16 feature
-                const device = await adapter.requestDevice({
-                    requiredFeatures: ['shader-f16']
-                });
-
-                // Run the f16 compute shader
-                await computeF16(device);
-
-            } else {
-                log('shader-f16 is NOT supported');
-            }
+        for (let i = 0; i < K * N; i++) {
+          // B[i] = Math.random() * 2 - 1; // Random values between -1 and 1
+          B[i] = 1.0;
         }
 
-        main();
+        for (let i = 0; i < M * N; i++) {
+          C[i] = 0;
+        }
+
+        // peek first 10 elements of A, B, C
+        // log('Matrix A (first 10 elements):', A.slice(0, 10));
+        // log('Matrix B (first 10 elements):', B.slice(0, 10));
+        // log('Matrix C (first 10 elements):', C.slice(0, 10));
+
+        const A_Buffer = device.createBuffer({
+          size: A.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        const B_Buffer = device.createBuffer({
+          size: B.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        const C_Buffer = device.createBuffer({
+          size: C.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+
+        // Create staging buffer for reading results
+        const stagingBuffer = device.createBuffer({
+          size: C.byteLength,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        // Upload input data
+        device.queue.writeBuffer(dimsBuffer, 0, dimsData);
+        device.queue.writeBuffer(A_Buffer, 0, A);
+        device.queue.writeBuffer(B_Buffer, 0, B);
+
+        // Create compute pipeline
+        const computePipeline = device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({
+              code: computeShader,
+            }),
+            entryPoint: "main",
+          },
+        });
+
+        // Create bind group
+        const bindGroup = device.createBindGroup({
+          layout: computePipeline.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: { buffer: dimsBuffer },
+            },
+            {
+              binding: 1,
+              resource: { buffer: A_Buffer },
+            },
+            {
+              binding: 2,
+              resource: { buffer: B_Buffer },
+            },
+            {
+              binding: 3,
+              resource: { buffer: C_Buffer },
+            },
+          ],
+        });
+
+        // Create command encoder and compute pass
+        const commandEncoder = device.createCommandEncoder();
+        const computePass = commandEncoder.beginComputePass();
+        computePass.setPipeline(computePipeline);
+        computePass.setBindGroup(0, bindGroup);
+
+        // Dispatch the compute shader (64x64 workgroups for 1024x1024 matrix)
+        computePass.dispatchWorkgroups(64, 64);
+        computePass.end();
+
+        // Copy output to staging buffer for reading
+        commandEncoder.copyBufferToBuffer(
+          C_Buffer,
+          0,
+          stagingBuffer,
+          0,
+          C.byteLength,
+        );
+
+        // auto start = chrono::high_resolution_clock::now();
+        // const start = performance.now();
+
+        // Submit and wait for GPU execution
+        const commandBuffer = commandEncoder.finish();
+        device.queue.submit([commandBuffer]);
+
+        // Wait for GPU to finish
+        await device.queue.onSubmittedWorkDone();
+
+        // auto end = chrono::high_resolution_clock::now();
+        // const end = performance.now();
+        // log(`GPU computation took ${(end - start).toFixed(2)} ms`);
+
+        // Map and read the results
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const results = new Float16Array(stagingBuffer.getMappedRange());
+        // Copy the data before unmapping to avoid detached ArrayBuffer
+        const resultsCopy = new Float16Array(results);
+        stagingBuffer.unmap();
+
+        // Display results
+        // log('Matrix multiplication completed!');
+        // log('Result matrix C (first 10 elements):', resultsCopy.slice(0, 10));
+
+        // // Show some sample results from different positions
+        // log('C[0,0] =', resultsCopy[0]);
+        // log('C[0,1] =', resultsCopy[1]);
+        // log('C[1,0] =', resultsCopy[1024]);
+        // log('C[1,1] =', resultsCopy[1025]);
+        // log('C[100,100] =', resultsCopy[100 * 1024 + 100]);
+
+        // Compute host-side reference result
+        log("Computing host-side reference...");
+        const startTime = performance.now();
+        const cpuResult = naiveMatrixMultiply(A, B, M, N, K);
+        const endTime = performance.now();
+        log(
+          `Host-side computation took ${(endTime - startTime).toFixed(2)} ms`,
+        );
+
+        // Compare GPU and CPU results
+        log("Comparing GPU vs CPU results...");
+        let maxDiff = 0;
+        let totalDiff = 0;
+        let numElements = M * N;
+        let numErrors = 0;
+        const tolerance = 0.1; // Tolerance for f16 precision differences
+
+        for (let i = 0; i < numElements; i++) {
+          const diff = Math.abs(resultsCopy[i] - cpuResult[i]);
+          if (diff > maxDiff) {
+            maxDiff = diff;
+          }
+          totalDiff += diff;
+          if (diff > tolerance) {
+            numErrors++;
+          }
+        }
+
+        const avgDiff = totalDiff / numElements;
+        log(`Max difference: ${maxDiff.toFixed(6)}`);
+        log(`Average difference: ${avgDiff.toFixed(6)}`);
+        log(
+          `Elements with difference > ${tolerance}: ${numErrors} out of ${numElements}`,
+        );
+        log(
+          `Accuracy: ${(((numElements - numErrors) / numElements) * 100).toFixed(2)}%`,
+        );
+
+        // Show some specific comparisons
+        log("Sample comparisons (GPU vs CPU):");
+        log(
+          `C[0,0]: GPU=${resultsCopy[0].toFixed(6)}, CPU=${cpuResult[0].toFixed(6)}, diff=${Math.abs(resultsCopy[0] - cpuResult[0]).toFixed(6)}`,
+        );
+        log(
+          `C[0,1]: GPU=${resultsCopy[1].toFixed(6)}, CPU=${cpuResult[1].toFixed(6)}, diff=${Math.abs(resultsCopy[1] - cpuResult[1]).toFixed(6)}`,
+        );
+        log(
+          `C[1,0]: GPU=${resultsCopy[1024].toFixed(6)}, CPU=${cpuResult[1024].toFixed(6)}, diff=${Math.abs(resultsCopy[1024] - cpuResult[1024]).toFixed(6)}`,
+        );
+        log(
+          `C[100,100]: GPU=${resultsCopy[100 * 1024 + 100].toFixed(6)}, CPU=${cpuResult[100 * 1024 + 100].toFixed(6)}, diff=${Math.abs(resultsCopy[100 * 1024 + 100] - cpuResult[100 * 1024 + 100]).toFixed(6)}`,
+        );
+
+        // Also log to console for debugging
+        log("F16 Results:", resultsCopy);
+        log("Matrix A:", A);
+        log("Matrix B:", B);
+
+        log("Compute shader executed successfully on GPU!");
+      }
+
+      async function main() {
+        if (!navigator.gpu?.requestAdapter) {
+          log("WebGPU is NOT available in this browser.");
+          return;
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          log("No GPU adapter found.");
+          return;
+        }
+
+        log("Adapter found: " + (adapter.info.description || "Unnamed GPU"));
+
+        // Check if shader-f16 is supported
+        if (adapter.features.has("shader-f16")) {
+          log("shader-f16 is supported");
+
+          // Create device with shader-f16 feature
+          const device = await adapter.requestDevice({
+            requiredFeatures: ["shader-f16"],
+          });
+
+          // Run the f16 compute shader
+          await computeF16(device);
+        } else {
+          log("shader-f16 is NOT supported");
+        }
+      }
+
+      main();
     </script>
-</body>
-
+  </body>
 </html>
