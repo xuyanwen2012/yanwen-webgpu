@@ -14,13 +14,33 @@
             document.getElementById('output').textContent += args.join(' ') + '\n';
         }
 
-        function printMatrix(A, rows, cols) {
-            for (let i = 0; i < rows; i++) {
-                let row = [];
-                for (let j = 0; j < cols; j++) {
-                    row.push(A[i * cols + j]);
+        function printMatrix(A, rows, cols, verbose = false) {
+            if (verbose) {
+                // Print full matrix
+                for (let i = 0; i < rows; i++) {
+                    let row = [];
+                    for (let j = 0; j < cols; j++) {
+                        row.push(A[i * cols + j]);
+                    }
+                    log(row.join(" "));
                 }
-                log(row.join(" "));
+            } else {
+                // Print abbreviated matrix with ellipsis
+                for (let i = 0; i < rows; i++) {
+                    if (i < 3 || i > rows - 4) {
+                        let row = [];
+                        for (let j = 0; j < cols; j++) {
+                            if (j < 3 || j > cols - 4) {
+                                row.push(A[i * cols + j]);
+                            } else if (j === 3) {
+                                row.push("...");
+                            }
+                        }
+                        log(row.join(" "));
+                    } else if (i === 3) {
+                        log("...");
+                    }
+                }
             }
         }
 
@@ -41,6 +61,20 @@
             log('CPU Took: ' + (end - start) + 'ms');
 
             printMatrix(C, 16, 16);
+            return C;
+        }
+
+        function calculateMSE(cpuResult, gpuResult, size) {
+            let mse = 0;
+            let numElements = size * size;
+
+            for (let i = 0; i < numElements; i++) {
+                let error = cpuResult[i] - gpuResult[i];
+                mse += error * error;
+            }
+
+            mse /= numElements;
+            return mse;
         }
 
 
@@ -201,7 +235,21 @@
                 ]
             });
 
-            // Create command encoder and compute pass
+            // Warmup: Run the kernel once without timing
+            log('Warming up GPU kernel...');
+            const warmupCommandEncoder = device.createCommandEncoder();
+            const warmupComputePass = warmupCommandEncoder.beginComputePass();
+            warmupComputePass.setPipeline(computePipeline);
+            warmupComputePass.setBindGroup(0, bindGroup);
+            warmupComputePass.dispatchWorkgroups(1);
+            warmupComputePass.end();
+
+            const warmupCommandBuffer = warmupCommandEncoder.finish();
+            device.queue.submit([warmupCommandBuffer]);
+            await device.queue.onSubmittedWorkDone();
+            log('Warmup completed.');
+
+            // Now run the actual timed execution
             const commandEncoder = device.createCommandEncoder();
             const computePass = commandEncoder.beginComputePass();
             computePass.setPipeline(computePipeline);
@@ -236,7 +284,16 @@
 
             printMatrix(resultsCopy, 16, 16);
 
-            cpuImplementation(A, B, C);
+            // Run CPU implementation and get results
+            const cpuResult = new Float16Array(16 * 16);
+            cpuImplementation(A, B, cpuResult);
+
+            // Calculate Mean Square Error
+            const mse = calculateMSE(cpuResult, resultsCopy, 16);
+            log('\n=== COMPARISON RESULTS ===');
+            log('Mean Square Error (MSE):', mse.toFixed(8));
+            log('Root Mean Square Error (RMSE):', Math.sqrt(mse).toFixed(8));
+            log('================================\n');
         }
 
         async function main() {
