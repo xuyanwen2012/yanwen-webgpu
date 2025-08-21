@@ -79,133 +79,136 @@
 
         async function run(device) {
             const computeShader = `
-enable chromium_experimental_subgroup_matrix;
-enable f16;
+                enable chromium_experimental_subgroup_matrix;
+                enable f16;
 
-@group(0) @binding(0) var<storage, read>        A : array<f16>;
-@group(0) @binding(1) var<storage, read>        B : array<f16>;
-@group(0) @binding(2) var<storage, read_write>  C : array<f16>;
+                @group(0) @binding(0) var<storage, read>        A : array<f16>;
+                @group(0) @binding(1) var<storage, read>        B : array<f16>;
+                @group(0) @binding(2) var<storage, read_write>  C : array<f16>;
 
-// ---- Shapes / Tunables ----
-const MAT_SIZE  : u32 = 1024u;  // square matrices
-const BLOCK_M   : u32 = 16u;    // logical C tile rows per workgroup
-const BLOCK_N   : u32 = 16u;    // logical C tile cols per workgroup
-const K_STEP    : u32 = 16u;    // K chunk per outer loop (multiple of SUB_K)
-const SUB_M     : u32 = 8u;     // HW tile M
-const SUB_N     : u32 = 8u;     // HW tile N
-const SUB_K     : u32 = 8u;     // HW tile K for MMA
+                // ---- Shapes / Tunables ----
+                const MAT_SIZE  : u32 = 1024u;  // Problem size
 
-const kColMajor : bool = false; // row-major layout; stride is MAT_SIZE
+                const BLOCK_M   : u32 = 16u;    // logical C tile rows per workgroup
+                const BLOCK_N   : u32 = 16u;    // logical C tile cols per workgroup
+                const K_STEP    : u32 = 16u;    // K chunk per outer loop (multiple of SUB_K)
 
-// Workgroup (shared) tiles, linearized
-const AS_ELEMS  : u32 = BLOCK_M * K_STEP;   // 16*16
-const BS_ELEMS  : u32 = K_STEP   * BLOCK_N; // 16*16
-var<workgroup> Asub : array<f16, AS_ELEMS>;
-var<workgroup> Bsub : array<f16, BS_ELEMS>;
+                const SUB_M     : u32 = 8u;     // HW tile M
+                const SUB_N     : u32 = 8u;     // HW tile N
+                const SUB_K     : u32 = 8u;     // HW tile K for MMA
 
-// ---- Helpers ----
-fn idx2D(row : u32, col : u32, stride : u32) -> u32 {
-  return row * stride + col;
-}
+                const kColMajor : bool = false; // row-major layout; stride is MAT_SIZE
 
-// ---- Kernel ----
-// One workgroup computes one 16x16 logical tile of C via four 8x8 MMAs.
-// We assume one subgroup per workgroup here (workgroup_size 64).
-@compute @workgroup_size(64, 1, 1)
-fn main(
-  @builtin(workgroup_id)           wg_id  : vec3<u32>,
-  @builtin(local_invocation_index) lidx   : u32,
-) {
-  let blockRow : u32 = wg_id.y * BLOCK_M;
-  let blockCol : u32 = wg_id.x * BLOCK_N;
+                // Workgroup (shared) tiles, linearized
+                // According to Tyler's code
+                //
+                const AS_ELEMS  : u32 = BLOCK_M  * K_STEP;   
+                const BS_ELEMS  : u32 = K_STEP   * BLOCK_N; 
+                var<workgroup> Asub : array<f16, AS_ELEMS>;
+                var<workgroup> Bsub : array<f16, BS_ELEMS>;
 
-  // Accumulators for the four quadrants of the 16x16 tile
-  var acc00 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
-  var acc01 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
-  var acc10 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
-  var acc11 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // ---- Helpers ----
+                fn idx2D(row : u32, col : u32, stride : u32) -> u32 {
+                    return row * stride + col;
+                }
 
-  // Loop over K in chunks of K_STEP
-  for (var k0 : u32 = 0u; k0 < MAT_SIZE; k0 += K_STEP) {
+                // ---- Kernel ----
+                // One workgroup computes one 16x16 logical tile of C via four 8x8 MMAs.
+                // We assume one subgroup per workgroup here (workgroup_size 64).
+                @compute @workgroup_size(64, 1, 1)
+                fn main(
+                @builtin(workgroup_id)           wg_id  : vec3<u32>,
+                @builtin(local_invocation_index) lidx   : u32,
+                ) {
+                let blockRow : u32 = wg_id.y * BLOCK_M;
+                let blockCol : u32 = wg_id.x * BLOCK_N;
 
-    // ---- Cooperative load A(blockRow..+15, k0..+K_STEP-1) into Asub ----
-    var t : u32 = lidx;
-    loop {
-      if (t >= AS_ELEMS) { break; }
-      let a_r : u32 = t / K_STEP;  // 0..BLOCK_M-1
-      let a_c : u32 = t % K_STEP;  // 0..K_STEP-1
-      let g_r : u32 = blockRow + a_r;
-      let g_c : u32 = k0 + a_c;
+                // Accumulators for the four quadrants of the 16x16 tile
+                var acc00 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                var acc01 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                var acc10 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                var acc11 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
 
-      if (g_r < MAT_SIZE && g_c < MAT_SIZE) {
-        Asub[t] = A[idx2D(g_r, g_c, MAT_SIZE)];
-      } else {
-        Asub[t] = f16(0.0);
-      }
+                // Loop over K in chunks of K_STEP
+                for (var k0 : u32 = 0u; k0 < MAT_SIZE; k0 += K_STEP) {
 
-      t += 64u; // advance by workgroup size (64 lanes here)
-    }
+                    // ---- Cooperative load A(blockRow..+15, k0..+K_STEP-1) into Asub ----
+                    var t : u32 = lidx;
+                    loop {
+                        if (t >= AS_ELEMS) { break; }
+                        let a_r : u32 = t / K_STEP;  // 0..BLOCK_M-1
+                        let a_c : u32 = t % K_STEP;  // 0..K_STEP-1
+                        let g_r : u32 = blockRow + a_r;
+                        let g_c : u32 = k0 + a_c;
 
-    // ---- Cooperative load B(k0..+K_STEP-1, blockCol..+15) into Bsub ----
-    t = lidx;
-    loop {
-      if (t >= BS_ELEMS) { break; }
-      let b_r : u32 = t / BLOCK_N; // 0..K_STEP-1
-      let b_c : u32 = t % BLOCK_N; // 0..BLOCK_N-1
-      let g_r : u32 = k0 + b_r;
-      let g_c : u32 = blockCol + b_c;
+                        if (g_r < MAT_SIZE && g_c < MAT_SIZE) {
+                            Asub[t] = A[idx2D(g_r, g_c, MAT_SIZE)];
+                        } else {
+                            Asub[t] = f16(0.0);
+                        }
 
-      if (g_r < MAT_SIZE && g_c < MAT_SIZE) {
-        Bsub[t] = B[idx2D(g_r, g_c, MAT_SIZE)];
-      } else {
-        Bsub[t] = f16(0.0);
-      }
+                        t += 64u; // advance by workgroup size (64 lanes here)
+                    }
 
-      t += 64u;
-    }
+                    // ---- Cooperative load B(k0..+K_STEP-1, blockCol..+15) into Bsub ----
+                    t = lidx;
+                    loop {
+                        if (t >= BS_ELEMS) { break; }
+                        let b_r : u32 = t / BLOCK_N; // 0..K_STEP-1
+                        let b_c : u32 = t % BLOCK_N; // 0..BLOCK_N-1
+                        let g_r : u32 = k0 + b_r;
+                        let g_c : u32 = blockCol + b_c;
 
-    workgroupBarrier();
+                        if (g_r < MAT_SIZE && g_c < MAT_SIZE) {
+                            Bsub[t] = B[idx2D(g_r, g_c, MAT_SIZE)];
+                        } else {
+                            Bsub[t] = f16(0.0);
+                        }
 
-    // ---- Compute: for this K_STEP, walk in SUB_K and issue 4x 8x8 MMAs ----
-    for (var kk : u32 = 0u; kk < K_STEP; kk += SUB_K) {
-      // TL quadrant: A[0..7, kk..kk+SUB_K-1] x B[kk..kk+SUB_K-1, 0..7]
-      let a_off_tl : u32 = idx2D(0u,  kk, K_STEP);
-      let b_off_tl : u32 = idx2D(kk, 0u,  BLOCK_N);
-      let L_tl = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off_tl, kColMajor, K_STEP);
-      let R_tl = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off_tl, kColMajor, BLOCK_N);
-      acc00 = subgroupMatrixMultiplyAccumulate(L_tl, R_tl, acc00);
+                        t += 64u;
+                    }
 
-      // TR quadrant: A[0..7, kk..] x B[kk.., 8..15]
-      let b_off_tr : u32 = idx2D(kk, 8u, BLOCK_N);
-      let R_tr = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off_tr, kColMajor, BLOCK_N);
-      acc01 = subgroupMatrixMultiplyAccumulate(L_tl, R_tr, acc01);
+                    workgroupBarrier();
 
-      // BL quadrant: A[8..15, kk..] x B[kk.., 0..7]
-      let a_off_bl : u32 = idx2D(8u, kk, K_STEP);
-      let L_bl = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off_bl, kColMajor, K_STEP);
-      acc10 = subgroupMatrixMultiplyAccumulate(L_bl, R_tl, acc10);
+                    // ---- Compute: for this K_STEP, walk in SUB_K and issue 4x 8x8 MMAs ----
+                    for (var kk : u32 = 0u; kk < K_STEP; kk += SUB_K) {
+                        // TL quadrant: A[0..7, kk..kk+SUB_K-1] x B[kk..kk+SUB_K-1, 0..7]
+                        let a_off_tl : u32 = idx2D(0u,  kk, K_STEP);
+                        let b_off_tl : u32 = idx2D(kk, 0u,  BLOCK_N);
+                        let L_tl = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off_tl, kColMajor, K_STEP);
+                        let R_tl = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off_tl, kColMajor, BLOCK_N);
+                        acc00 = subgroupMatrixMultiplyAccumulate(L_tl, R_tl, acc00);
 
-      // BR quadrant: A[8..15, kk..] x B[kk.., 8..15]
-      acc11 = subgroupMatrixMultiplyAccumulate(L_bl, R_tr, acc11);
-    }
+                        // TR quadrant: A[0..7, kk..] x B[kk.., 8..15]
+                        let b_off_tr : u32 = idx2D(kk, 8u, BLOCK_N);
+                        let R_tr = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off_tr, kColMajor, BLOCK_N);
+                        acc01 = subgroupMatrixMultiplyAccumulate(L_tl, R_tr, acc01);
 
-    workgroupBarrier(); // safe to overwrite Asub/Bsub in next iteration
-  }
+                        // BL quadrant: A[8..15, kk..] x B[kk.., 0..7]
+                        let a_off_bl : u32 = idx2D(8u, kk, K_STEP);
+                        let L_bl = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off_bl, kColMajor, K_STEP);
+                        acc10 = subgroupMatrixMultiplyAccumulate(L_bl, R_tl, acc10);
 
-  // ---- Store back the four 8x8 quadrants to C ----
-  let c_off00 : u32 = idx2D(blockRow + 0u, blockCol + 0u, MAT_SIZE);
-  subgroupMatrixStore(&C, c_off00, acc00, kColMajor, MAT_SIZE);
+                        // BR quadrant: A[8..15, kk..] x B[kk.., 8..15]
+                        acc11 = subgroupMatrixMultiplyAccumulate(L_bl, R_tr, acc11);
+                    }
 
-  let c_off01 : u32 = idx2D(blockRow + 0u, blockCol + 8u, MAT_SIZE);
-  subgroupMatrixStore(&C, c_off01, acc01, kColMajor, MAT_SIZE);
+                    workgroupBarrier(); // safe to overwrite Asub/Bsub in next iteration
+                }
 
-  let c_off10 : u32 = idx2D(blockRow + 8u, blockCol + 0u, MAT_SIZE);
-  subgroupMatrixStore(&C, c_off10, acc10, kColMajor, MAT_SIZE);
+                // ---- Store back the four 8x8 quadrants to C ----
+                let c_off00 : u32 = idx2D(blockRow + 0u, blockCol + 0u, MAT_SIZE);
+                subgroupMatrixStore(&C, c_off00, acc00, kColMajor, MAT_SIZE);
 
-  let c_off11 : u32 = idx2D(blockRow + 8u, blockCol + 8u, MAT_SIZE);
-  subgroupMatrixStore(&C, c_off11, acc11, kColMajor, MAT_SIZE);
-}
+                let c_off01 : u32 = idx2D(blockRow + 0u, blockCol + 8u, MAT_SIZE);
+                subgroupMatrixStore(&C, c_off01, acc01, kColMajor, MAT_SIZE);
 
+                let c_off10 : u32 = idx2D(blockRow + 8u, blockCol + 0u, MAT_SIZE);
+                subgroupMatrixStore(&C, c_off10, acc10, kColMajor, MAT_SIZE);
+
+                let c_off11 : u32 = idx2D(blockRow + 8u, blockCol + 8u, MAT_SIZE);
+                subgroupMatrixStore(&C, c_off11, acc11, kColMajor, MAT_SIZE);
+                }
             `;
 
             log(computeShader);
