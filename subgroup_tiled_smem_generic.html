@@ -17,6 +17,7 @@
         // Logical tile size in X/Y direction
         // Basically, you want to use HW tiles to compute the logical tile for each workgroup
         //
+        // e.g., 8x8, 16x16, 32x32, 64x64, 128x128, 256x256, 512x512, 1024x1024, etc.
         const BLOCK_M = 16; // logical C tile rows per workgroup
         const BLOCK_N = 16;
 
@@ -28,14 +29,12 @@
         const SUB_N = 8;
         const SUB_K = 8;
 
-            
-
         // Let's call these "WORKGROUP_SIZE_X", "WORKGROUP_SIZE_Y"
         // Limitations:
         // (1) WORKGROUP_SIZE_X must be a multiple of 64
         // (2) WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y <= 256
         // The only valid workgroup sizes are:
-        // @workgroup_size(64, 1, 1)     // 64 threads
+        // @workgroup_size(64, 1, 1)     // 64 threads (matches the HW tile size)
         // @workgroup_size(64, 2, 1)     // 128 threads  
         // @workgroup_size(64, 4, 1)     // 256 threads
         // @workgroup_size(128, 1, 1)    // 128 threads
@@ -185,6 +184,11 @@
                 const SUB_N     : u32 = ${SUB_N}u;     // HW tile N
                 const SUB_K     : u32 = ${SUB_K}u;     // HW tile K for MMA
 
+                // Calculate how many HW tiles we need in each dimension
+                const NUM_HW_TILES_M : u32 = BLOCK_M / SUB_M;  
+                const NUM_HW_TILES_N : u32 = BLOCK_N / SUB_N;  
+                const TOTAL_HW_TILES : u32 = NUM_HW_TILES_M * NUM_HW_TILES_N;                  
+
                 const kColMajor : bool = false; // row-major layout; stride is MAT_SIZE
 
                 // Workgroup (shared) tiles, linearized
@@ -209,10 +213,14 @@
                 let blockRow : u32 = wg_id.y * BLOCK_M;
                 let blockCol : u32 = wg_id.x * BLOCK_N;
 
-                var acc00 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
-                var acc01 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
-                var acc10 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
-                var acc11 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc00 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc01 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc10 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc11 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+
+                // e.g., a 2x2 accumulators
+                var acc : array<subgroup_matrix_result<f16, SUB_M, SUB_N>, TOTAL_HW_TILES>;
+
 
                 for (var k0 : u32 = 0u; k0 < MAT_SIZE; k0 += K_STEP) {
 
@@ -254,46 +262,42 @@
 
                     workgroupBarrier();
 
-                    // ---- Compute: for this K_STEP, walk in SUB_K and issue 4x 8x8 MMAs ----
+                    // ---- Compute: for this K_STEP, walk in SUB_K and issue MMAs for all HW tiles ----
                     for (var kk : u32 = 0u; kk < K_STEP; kk += SUB_K) {
-
-                        // TL quadrant: A[0..7, kk..kk+SUB_K-1] x B[kk..kk+SUB_K-1, 0..7]
-                        let a_off_tl : u32 = idx2D(0u,  kk, K_STEP);
-                        let b_off_tl : u32 = idx2D(kk, 0u,  BLOCK_N);
-                        let L_tl = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off_tl, kColMajor, K_STEP);
-                        let R_tl = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off_tl, kColMajor, BLOCK_N);
-                        acc00 = subgroupMatrixMultiplyAccumulate(L_tl, R_tl, acc00);
-
-                        // TR quadrant: A[0..7, kk..] x B[kk.., 8..15]
-                        let b_off_tr : u32 = idx2D(kk, 8u, BLOCK_N);
-                        let R_tr = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off_tr, kColMajor, BLOCK_N);
-                        acc01 = subgroupMatrixMultiplyAccumulate(L_tl, R_tr, acc01);
-
-                        // BL quadrant: A[8..15, kk..] x B[kk.., 0..7]
-                        let a_off_bl : u32 = idx2D(8u, kk, K_STEP);
-                        let L_bl = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off_bl, kColMajor, K_STEP);
-                        acc10 = subgroupMatrixMultiplyAccumulate(L_bl, R_tl, acc10);
-
-                        // BR quadrant: A[8..15, kk..] x B[kk.., 8..15]
-                        acc11 = subgroupMatrixMultiplyAccumulate(L_bl, R_tr, acc11);
-
+                        
+                        // Iterate over all HW tiles in the logical tile
+                        for (var tile_m : u32 = 0u; tile_m < NUM_HW_TILES_M; tile_m++) {
+                            for (var tile_n : u32 = 0u; tile_n < NUM_HW_TILES_N; tile_n++) {
+                                
+                                let acc_idx : u32 = tile_m * NUM_HW_TILES_N + tile_n;
+                                
+                                // Calculate offsets for this HW tile
+                                let a_off : u32 = idx2D(tile_m * SUB_M, kk, K_STEP);
+                                let b_off : u32 = idx2D(kk, tile_n * SUB_N, BLOCK_N);
+                                
+                                // Load matrices for this HW tile
+                                let L = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&Asub, a_off, kColMajor, K_STEP);
+                                let R = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&Bsub, b_off, kColMajor, BLOCK_N);
+                                
+                                // Accumulate for this HW tile
+                                acc[acc_idx] = subgroupMatrixMultiplyAccumulate(L, R, acc[acc_idx]);
+                            }
+                        }
                     }
 
                     workgroupBarrier(); // safe to overwrite Asub/Bsub in next iteration
                 }
 
-                // ---- Store back the four 8x8 quadrants to C ----
-                let c_off00 : u32 = idx2D(blockRow + 0u, blockCol + 0u, MAT_SIZE);
-                subgroupMatrixStore(&C, c_off00, acc00, kColMajor, MAT_SIZE);
-
-                let c_off01 : u32 = idx2D(blockRow + 0u, blockCol + 8u, MAT_SIZE);
-                subgroupMatrixStore(&C, c_off01, acc01, kColMajor, MAT_SIZE);
-
-                let c_off10 : u32 = idx2D(blockRow + 8u, blockCol + 0u, MAT_SIZE);
-                subgroupMatrixStore(&C, c_off10, acc10, kColMajor, MAT_SIZE);
-
-                let c_off11 : u32 = idx2D(blockRow + 8u, blockCol + 8u, MAT_SIZE);
-                subgroupMatrixStore(&C, c_off11, acc11, kColMajor, MAT_SIZE);
+                // ---- Store back all HW tiles to C ----
+                for (var tile_m : u32 = 0u; tile_m < NUM_HW_TILES_M; tile_m++) {
+                    for (var tile_n : u32 = 0u; tile_n < NUM_HW_TILES_N; tile_n++) {
+                        
+                        let acc_idx : u32 = tile_m * NUM_HW_TILES_N + tile_n;
+                        let c_off : u32 = idx2D(blockRow + tile_m * SUB_M, blockCol + tile_n * SUB_N, MAT_SIZE);
+                        
+                        subgroupMatrixStore(&C, c_off, acc[acc_idx], kColMajor, MAT_SIZE);
+                    }
+                }
                 }
             `;
 
