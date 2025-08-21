@@ -122,14 +122,17 @@
                     @builtin(workgroup_id)  wg_id : vec3<u32>,
                     @builtin(subgroup_id)  sid  : u32,
                 ) {
-                    let tile_col : u32 = wg_id.x; // 0..7
-                    let tile_row : u32 = wg_id.y; // 0..7
+                    let tile_col : u32 = wg_id.x % NUM_TILES; 
+                    let tile_row : u32 = wg_id.x / NUM_TILES; 
+                    
+                    if (wg_id.x >= NUM_TILES * NUM_TILES) {
+                        return;
+                    }
 
 
                     var ACC : subgroup_matrix_result<f16, 8, 8>;
 
 
-                    // Walk the K dimension in 8-wide tiles
                     for (var k_tile = 0u; k_tile < NUM_TILES; k_tile++) {
                         let a_offset = u32(tile_row * MAT_SIZE + k_tile * TILE_SIZE);
                         let b_offset = u32(k_tile * MAT_SIZE + tile_col * TILE_SIZE);
@@ -146,7 +149,6 @@
                     // let tmp = A[0];
                     // let tmp2 = B[0];
                     // let tmp3 = C[0];
-                    
                 }
             `;
 
@@ -160,13 +162,14 @@
             const C = new Float16Array(MAT_SIZE * MAT_SIZE); // 2 tiles in X, 2 tiles in Y
 
             for (let i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
-                A[i] = Math.random();
+                A[i] = Math.random() / 10.0;
                 // A[i] = 1.0;
             }
 
             for (let i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
-                // B[i] = 1.0;
-                B[i] = Math.random();
+                const row = Math.floor(i / MAT_SIZE);
+                const col = i % MAT_SIZE;
+                B[i] = (row === col) ? 1.0 : 0.0;
             }
 
             for (let i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
@@ -234,7 +237,7 @@
             const warmupComputePass = warmupCommandEncoder.beginComputePass();
             warmupComputePass.setPipeline(computePipeline);
             warmupComputePass.setBindGroup(0, bindGroup);
-            warmupComputePass.dispatchWorkgroups(1);
+            warmupComputePass.dispatchWorkgroups(64);
             warmupComputePass.end();
 
             const warmupCommandBuffer = warmupCommandEncoder.finish();
@@ -249,7 +252,8 @@
             computePass.setBindGroup(0, bindGroup);
 
             // Dispatch the compute shader
-            computePass.dispatchWorkgroups(1);
+            // For 64x64 matrix with 8x8 tiles, we need 8*8 = 64 workgroups
+            computePass.dispatchWorkgroups(64);
             computePass.end();
 
             // Copy output to staging buffer for reading
