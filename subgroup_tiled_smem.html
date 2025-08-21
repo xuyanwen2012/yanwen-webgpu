@@ -44,21 +44,75 @@
             }
         }
 
-        function cpuImplementation(A, B, C, matrix_size) {
+        async function cpuImplementation(A, B, C, matrix_size) {
+            const num_threads = navigator.hardwareConcurrency || 4;
             let start = performance.now();
 
-            for (let i = 0; i < matrix_size; i++) {
-                for (let j = 0; j < matrix_size; j++) {
-                    C[i * matrix_size + j] = 0;
-                    for (let k = 0; k < matrix_size; k++) {
-                        C[i * matrix_size + j] += A[i * matrix_size + k] * B[k * matrix_size + j];
+            // Create worker code as a blob
+            const workerCode = `
+                self.onmessage = function(e) {
+                    const { A, B, matrix_size, startRow, endRow } = e.data;
+                    const localC = new Float16Array(matrix_size * matrix_size);
+                    
+                    for (let i = startRow; i < endRow; i++) {
+                        for (let j = 0; j < matrix_size; j++) {
+                            localC[i * matrix_size + j] = 0;
+                            for (let k = 0; k < matrix_size; k++) {
+                                localC[i * matrix_size + j] += A[i * matrix_size + k] * B[k * matrix_size + j];
+                            }
+                        }
                     }
-                }
+                    
+                    self.postMessage({ localC, startRow, endRow });
+                };
+            `;
+
+            const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+            const workerUrl = URL.createObjectURL(workerBlob);
+
+            // Calculate rows per thread
+            const rowsPerThread = Math.ceil(matrix_size / num_threads);
+            const workers = [];
+            const promises = [];
+
+            // Create and start workers
+            for (let i = 0; i < num_threads; i++) {
+                const startRow = i * rowsPerThread;
+                const endRow = Math.min((i + 1) * rowsPerThread, matrix_size);
+
+                if (startRow >= matrix_size) break;
+
+                const worker = new Worker(workerUrl);
+                workers.push(worker);
+
+                const promise = new Promise((resolve) => {
+                    worker.onmessage = function (e) {
+                        const { localC, startRow, endRow } = e.data;
+                        // Copy results to main array
+                        for (let row = startRow; row < endRow; row++) {
+                            for (let col = 0; col < matrix_size; col++) {
+                                C[row * matrix_size + col] = localC[row * matrix_size + col];
+                            }
+                        }
+                        resolve();
+                    };
+                });
+                promises.push(promise);
+
+                worker.postMessage({ A, B, matrix_size, startRow, endRow });
             }
+
+            // Wait for all workers to complete
+            await Promise.all(promises);
+
+            // Clean up workers
+            workers.forEach(worker => worker.terminate());
+            URL.revokeObjectURL(workerUrl);
 
             let end = performance.now();
 
             log("\nCPU Took: " + (end - start) + "ms");
+            log("Used " + workers.length + " threads");
 
             printMatrix(C, matrix_size, matrix_size);
             return C;
@@ -355,7 +409,7 @@
 
             // Run CPU implementation and get results
             const cpuResult = new Float16Array(MAT_SIZE * MAT_SIZE);
-            cpuImplementation(A, B, cpuResult, MAT_SIZE);
+            await cpuImplementation(A, B, cpuResult, MAT_SIZE);
 
             // Calculate Mean Square Error
             const mse = calculateMSE(cpuResult, resultsCopy, MAT_SIZE);
