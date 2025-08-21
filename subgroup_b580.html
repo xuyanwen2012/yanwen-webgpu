@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>WebGPU Subgroup Matrix</title>
+</head>
+
+<body>
+    <pre id="output"></pre>
+
+    <script>
+        function log(...args) {
+            document.getElementById("output").textContent += args.join(" ") + "\n";
+        }
+
+
+        function printMatrix(A, rows, cols, verbose = false) {
+            if (verbose) {
+                // Print full matrix
+                for (let i = 0; i < rows; i++) {
+                    let row = [];
+                    for (let j = 0; j < cols; j++) {
+                        row.push(A[i * cols + j]);
+                    }
+                    log(row.join(" "));
+                }
+            } else {
+                // Print abbreviated matrix with ellipsis
+                for (let i = 0; i < rows; i++) {
+                    if (i < 3 || i > rows - 4) {
+                        let row = [];
+                        for (let j = 0; j < cols; j++) {
+                            if (j < 3 || j > cols - 4) {
+                                row.push(A[i * cols + j]);
+                            } else if (j === 3) {
+                                row.push("...");
+                            }
+                        }
+                        log(row.join(" "));
+                    } else if (i === 3) {
+                        log("...");
+                    }
+                }
+            }
+        }
+
+        async function run(device) {
+            // now the tensor size is 8x8
+
+            const computeShader = `
+                enable chromium_experimental_subgroup_matrix;
+                enable f16;
+
+                @group(0) @binding(0) var<storage, read>        A : array<f16>;
+                @group(0) @binding(1) var<storage, read>        B : array<f16>;
+                @group(0) @binding(2) var<storage, read_write>  C : array<f16>;
+
+                const kColMajor : bool = false;  
+                const kStride   : u32  = 8u;     
+
+                @compute @workgroup_size(64, 1, 1)
+                fn main(
+                    @builtin(global_invocation_id) gid : vec3<u32>,
+                ) {
+                    // auto idx =  blockIdx.x * blockDim.x + threadIdx.x; 
+                    var idx = gid.x * 8 + gid.y;
+
+                    const offset = 0;
+
+                    // var L = subgroupMatrixLoad<subgroup_matrix_left<f16, 8, 8>>(&A, offset, kColMajor, kStride);
+                    // var R = subgroupMatrixLoad<subgroup_matrix_right<f16, 8, 8>>(&B, offset, kColMajor, kStride);
+                    // var ACC : subgroup_matrix_result<f16, 8, 8>;
+
+                    // ACC = subgroupMatrixMultiplyAccumulate(L, R, ACC);
+
+                    // subgroupMatrixStore(&C, offset, ACC, kColMajor, kStride);
+
+
+                    //
+                    var tmp = A[0];
+                    var tmp2 = B[0];
+                    C[idx] = 6.0;
+
+                }
+            `;
+
+            log(computeShader);
+
+            const A = new Float16Array(8 * 8);
+            const B = new Float16Array(8 * 8);
+            const C = new Float16Array(8 * 8);
+
+            for (let i = 0; i < 8 * 8; i++) {
+                A[i] = i;
+                C[i] = 0.0;
+            }
+
+            // Fill B as an 8x8 identity matrix
+            for (let i = 0; i < 8; i++) {
+                for (let j = 0; j < 8; j++) {
+                    B[i * 8 + j] = (i === j) ? 1.0 : 0.0;
+                }
+            }
+
+            const A_Buffer = device.createBuffer({
+                size: A.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            const B_Buffer = device.createBuffer({
+                size: B.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            const C_Buffer = device.createBuffer({
+                size: C.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            });
+
+            // Create staging buffer for reading results
+            const stagingBuffer = device.createBuffer({
+                size: C.byteLength,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+
+            device.queue.writeBuffer(A_Buffer, 0, A);
+            device.queue.writeBuffer(B_Buffer, 0, B);
+
+            // Create compute pipeline
+            const computePipeline = device.createComputePipeline({
+                layout: "auto",
+                compute: {
+                    module: device.createShaderModule({
+                        code: computeShader,
+                    }),
+                    entryPoint: "main",
+                },
+            });
+
+            // Create bind group
+
+            const bindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    {
+                        binding: 0,
+                        resource: { buffer: A_Buffer },
+                    },
+                    {
+                        binding: 1,
+                        resource: { buffer: B_Buffer },
+                    },
+                    {
+                        binding: 2,
+                        resource: { buffer: C_Buffer },
+                    },
+                ],
+            });
+
+            // Create command encoder and compute pass
+            const commandEncoder = device.createCommandEncoder();
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, bindGroup);
+
+            // Dispatch the compute shader
+            computePass.dispatchWorkgroups(1);
+            computePass.end();
+
+            // Copy output to staging buffer for reading
+            commandEncoder.copyBufferToBuffer(
+                C_Buffer,
+                0,
+                stagingBuffer,
+                0,
+                C.byteLength,
+            );
+
+            // Submit and wait for GPU execution
+            const commandBuffer = commandEncoder.finish();
+            device.queue.submit([commandBuffer]);
+
+            let start = performance.now();
+
+            await device.queue.onSubmittedWorkDone();
+
+            let end = performance.now();
+
+            log(
+                "Compute shader executed successfully on GPU! " +
+                (end - start) +
+                "ms",
+            );
+
+            // Map and read the results
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const results = new Float16Array(stagingBuffer.getMappedRange());
+
+            // Copy the data before unmapping to avoid detached ArrayBuffer
+            const resultsCopy = new Float16Array(results);
+            stagingBuffer.unmap();
+
+            printMatrix(resultsCopy, 8, 8, true);
+        }
+
+        async function main() {
+            if (!navigator.gpu?.requestAdapter) {
+                log("WebGPU is NOT available in this browser.");
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                log("No GPU adapter found.");
+                return;
+            }
+
+            log("Adapter found: " + (adapter.info.description || "Unnamed GPU"));
+
+            const requiredFeatures = [
+                "chromium-experimental-subgroup-matrix",
+                "shader-f16",
+            ];
+
+            if (!requiredFeatures.every((f) => adapter.features.has(f))) {
+                log("Missing required features:", requiredFeatures.join(", "));
+                return;
+            }
+
+            const device = await adapter.requestDevice({ requiredFeatures });
+            log("Running...");
+            await run(device);
+        }
+
+        main();
+    </script>
+</body>
+
+</html>
