@@ -15,6 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class COIRequestHandler(http.server.SimpleHTTPRequestHandler):
     # Serve from a specific directory (set by the server)
     def __init__(self, *args, directory=None, **kwargs):
@@ -46,9 +47,11 @@ class COIRequestHandler(http.server.SimpleHTTPRequestHandler):
             html_files = sorted(
                 [p.name for p in Path(self.directory).glob("*.html") if p.is_file()]
             )
-            content = ["<!DOCTYPE html><html><head><meta charset='utf-8'>",
-                       "<title>HTML Files</title></head><body>",
-                       "<h1>HTML Files</h1><ul>"]
+            content = [
+                "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+                "<title>HTML Files</title></head><body>",
+                "<h1>HTML Files</h1><ul>",
+            ]
             for f in html_files:
                 content.append(f"<li><a href='/{f}'>{f}</a></li>")
             content.append("</ul></body></html>")
@@ -61,6 +64,7 @@ class COIRequestHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error serving index: {e}")
             self.send_error(500, "Internal server error")
+
 
 def main():
     parser = argparse.ArgumentParser(description="COI static server (SAB-ready)")
@@ -84,11 +88,14 @@ def main():
     with ThreadingHTTPServer((args.host, args.port), handler) as httpd:
         logger.info(f"Serving: {directory}")
         logger.info(f"URL:     http://{args.host}:{args.port}")
-        logger.info("COOP/COEP enabled (SharedArrayBuffer should work). Ctrl+C to stop.")
+        logger.info(
+            "COOP/COEP enabled (SharedArrayBuffer should work). Ctrl+C to stop."
+        )
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
+
 
 if __name__ == "__main__":
     main()
