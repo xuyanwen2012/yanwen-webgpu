@@ -171,19 +171,17 @@
                 // We assume one subgroup per workgroup here (workgroup_size 64).
                 @compute @workgroup_size(64, 1, 1)
                 fn main(
-                @builtin(workgroup_id)           wg_id  : vec3<u32>,
-                @builtin(local_invocation_index) lidx   : u32,
+                    @builtin(workgroup_id)           wg_id  : vec3<u32>,
+                    @builtin(local_invocation_index) lidx   : u32,
                 ) {
                 let blockRow : u32 = wg_id.y * BLOCK_M;
                 let blockCol : u32 = wg_id.x * BLOCK_N;
 
-                // Accumulators for the four quadrants of the 16x16 tile
                 var acc00 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
                 var acc01 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
                 var acc10 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
                 var acc11 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
 
-                // Loop over K in chunks of K_STEP
                 for (var k0 : u32 = 0u; k0 < MAT_SIZE; k0 += K_STEP) {
 
                     // ---- Cooperative load A(blockRow..+15, k0..+K_STEP-1) into Asub ----
@@ -226,6 +224,7 @@
 
                     // ---- Compute: for this K_STEP, walk in SUB_K and issue 4x 8x8 MMAs ----
                     for (var kk : u32 = 0u; kk < K_STEP; kk += SUB_K) {
+
                         // TL quadrant: A[0..7, kk..kk+SUB_K-1] x B[kk..kk+SUB_K-1, 0..7]
                         let a_off_tl : u32 = idx2D(0u,  kk, K_STEP);
                         let b_off_tl : u32 = idx2D(kk, 0u,  BLOCK_N);
@@ -245,6 +244,7 @@
 
                         // BR quadrant: A[8..15, kk..] x B[kk.., 8..15]
                         acc11 = subgroupMatrixMultiplyAccumulate(L_bl, R_tr, acc11);
+
                     }
 
                     workgroupBarrier(); // safe to overwrite Asub/Bsub in next iteration
