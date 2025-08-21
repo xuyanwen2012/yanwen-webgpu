@@ -10,14 +10,25 @@
     <pre id="output"></pre>
 
     <script>
-        // Global constants for both CPU and GPU
+        // Problem size
+        // We are working on square matrices here
         const MATRIX_SIZE = 1024;
-        const BLOCK_M = 16;
+
+        // Logical tile size in X/Y direction
+        // Basically, you want to use HW tiles to compute the logical tile for each workgroup
+        //
+        const BLOCK_M = 16; // logical C tile rows per workgroup
         const BLOCK_N = 16;
-        const K_STEP = 16;
+
+        const K_STEP = 16; // multiple of 'SUB_K', affect the shared memory usage
+
+        // HW specific, for Apple M4, it's 8x8
+        // (M, K) x (K, N)
         const SUB_M = 8;
         const SUB_N = 8;
         const SUB_K = 8;
+
+            
 
         // Let's call these "WORKGROUP_SIZE_X", "WORKGROUP_SIZE_Y"
         // Limitations:
