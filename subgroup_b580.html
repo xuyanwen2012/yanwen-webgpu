@@ -14,13 +14,36 @@
             document.getElementById("output").textContent += args.join(" ") + "\n";
         }
 
-        function printMatrix(A, rows, cols, verbose = false) {
+        function printMatrix(A, rows, cols, verbose = false, padding = null) {
+            // Helper to pad a value to a string of given width
+            function padValue(val, width) {
+                let s = String(val);
+                if (width == null) return s;
+                // If val is a number, format to fixed decimals for alignment
+                if (typeof val === "number") {
+                    // Try to keep 4 significant digits for floats
+                    if (Number.isInteger(val)) {
+                        s = val.toString();
+                    } else {
+                        s = val.toFixed(3);
+                    }
+                }
+                // If it's an ellipsis, just center it
+                if (s === "...") {
+                    let left = Math.floor((width - 3) / 2);
+                    let right = width - 3 - left;
+                    return " ".repeat(left) + "..." + " ".repeat(right);
+                }
+                // Pad left for numbers, right for others
+                return s.padStart(width, " ");
+            }
+
             if (verbose) {
                 // Print full matrix
                 for (let i = 0; i < rows; i++) {
                     let row = [];
                     for (let j = 0; j < cols; j++) {
-                        row.push(A[i * cols + j]);
+                        row.push(padValue(A[i * cols + j], padding));
                     }
                     log(row.join(" "));
                 }
@@ -31,14 +54,23 @@
                         let row = [];
                         for (let j = 0; j < cols; j++) {
                             if (j < 3 || j > cols - 4) {
-                                row.push(A[i * cols + j]);
+                                row.push(padValue(A[i * cols + j], padding));
                             } else if (j === 3) {
-                                row.push("...");
+                                row.push(padValue("...", padding));
                             }
                         }
                         log(row.join(" "));
                     } else if (i === 3) {
-                        log("...");
+                        // Print a row of ellipsis, padded if needed
+                        let ellipsisRow = [];
+                        for (let j = 0; j < cols; j++) {
+                            if (j < 3 || j > cols - 4) {
+                                ellipsisRow.push(padValue("...", padding));
+                            } else if (j === 3) {
+                                ellipsisRow.push(padValue("...", padding));
+                            }
+                        }
+                        log(ellipsisRow.join(" "));
                     }
                 }
             }
@@ -57,6 +89,8 @@
         // Workgroup size, how many threads to use per workgroup
         // For Intel B580, the workgroup_size_x must be a multiple of the
         // device maxSubgroupSize (32) when the shader uses a subgroup matrix.
+        // It seems like the warp size is 32
+        // so 4 warps per workgroup
         const WORKGROUP_SIZE_X = 128;
         const WORKGROUP_SIZE_Y = 1;
 
@@ -101,23 +135,34 @@
                 const MAT_N  : u32 = ${MATRIX_N}u;
                 const MAT_K  : u32 = ${MATRIX_K}u;
 
+                const K_STEP : u32 = 8u;
+
                 const SUB_M     : u32 = ${SUB_M}u;
                 const SUB_N     : u32 = ${SUB_N}u;
                 const SUB_K     : u32 = ${SUB_K}u;
 
+                const kColMajor : bool = false; // row-major layout
+
+                // Currently using 1D layout for C
                 @compute @workgroup_size(${WORKGROUP_SIZE_X}, ${WORKGROUP_SIZE_Y}, 1)
                 fn main(
-                    @builtin(local_invocation_id)  local_id   : vec3<u32>, // threadIdx
-                    @builtin(workgroup_id)         group_id   : vec3<u32>, // blockIdx
+                    @builtin(local_invocation_id)  local_id   : vec3<u32>,
+                    @builtin(workgroup_id)         group_id   : vec3<u32>, 
                     @builtin(global_invocation_id) global_id  : vec3<u32>, 
+                    @builtin(subgroup_id)          subgroup_id : u32,
                 ) {
-                    var idx = global_id.y * ${MATRIX_N} + global_id.x;
-                    
                     var ACC : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+
+
+                    let L = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&A, 0, kColMajor, K_STEP);
+                    let R = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&B, 0, kColMajor, K_STEP);
+                    ACC = subgroupMatrixMultiplyAccumulate(L, R, ACC);
+
+                    // subgroupMatrixStore(&C, 0, ACC, kColMajor, K_STEP);
                     
                     var tmp = A[0];
                     var tmp2 = B[0];
-                    C[idx] = 6.0;
+                    C[global_id.x] = f16(subgroup_id);
                 }
             `;
 
@@ -206,11 +251,11 @@
 
             // Dispatch the compute shader
 
-            const gridX = Math.ceil(MATRIX_M / WORKGROUP_SIZE_X);
-            const gridY = Math.ceil(MATRIX_N / WORKGROUP_SIZE_Y);
-            log("gridX: " + gridX + ", gridY: " + gridY);
+            // const gridX = Math.ceil(MATRIX_M / WORKGROUP_SIZE_X);
+            // const gridY = Math.ceil(MATRIX_N / WORKGROUP_SIZE_Y);
+            // log("gridX: " + gridX + ", gridY: " + gridY);
 
-            computePass.dispatchWorkgroups(gridX, gridY, 1);
+            computePass.dispatchWorkgroups(1, 1, 1);
             computePass.end();
 
             // Copy output to staging buffer for reading
@@ -246,7 +291,7 @@
             const resultsCopy = new Float16Array(results);
             stagingBuffer.unmap();
 
-            printMatrix(resultsCopy, MATRIX_M, MATRIX_N, true);
+            printMatrix(resultsCopy, MATRIX_M, MATRIX_N, true, 3);
         }
 
         async function main() {
