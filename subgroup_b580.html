@@ -14,7 +14,6 @@
             document.getElementById("output").textContent += args.join(" ") + "\n";
         }
 
-
         function printMatrix(A, rows, cols, verbose = false) {
             if (verbose) {
                 // Print full matrix
@@ -45,8 +44,50 @@
             }
         }
 
+        // Problem size
+        const MATRIX_M = 8;
+        const MATRIX_N = 16;
+        const MATRIX_K = 16;
+
+        // HW tile shapes (must be subgroupMatrix supported sizes)
+        const SUB_M = 8;
+        const SUB_N = 16;
+        const SUB_K = 16;
+
+        // Workgroup size, how many threads to use per workgroup
+        // For Intel B580, the workgroup_size_x must be a multiple of the
+        // device maxSubgroupSize (32) when the shader uses a subgroup matrix.
+        const WORKGROUP_SIZE_X = 128;
+        const WORKGROUP_SIZE_Y = 1;
+
         async function run(device) {
-            // now the tensor size is 8x8
+            // ======================================================
+            // Available Tensor Core (MMA) Tile Shapes (subgroupMatrix)
+            // ======================================================
+            //
+            // For FP16 inputs:
+            //   - f16 x f16 -> f16   (M=8, N=16, K=16)
+            //   - f16 x f16 -> f32   (M=8, N=16, K=16)
+            //
+            // For INT8 inputs:
+            //   - i8  x i8  -> i32   (M=8, N=16, K=32)
+            //
+            // For UINT8 inputs:
+            //   - u8  x u8  -> u32   (M=8, N=16, K=32)
+            //
+            // ------------------------------------------------------
+            // Notes:
+            // - M = number of rows of the output tile
+            // - N = number of columns of the output tile
+            // - K = reduction dimension size
+            // - Result type determines accumulator precision
+            // ======================================================
+
+
+            // For Intel B580, the workgroup_size must be a multiple of the device maxSubgroupSize (32) 
+            // when the shader uses a subgroup matrix.
+
+            console.assert(WORKGROUP_SIZE_X % 32 === 0, "WORKGROUP_SIZE_X must be a multiple of 32");
 
             const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
@@ -56,52 +97,51 @@
                 @group(0) @binding(1) var<storage, read>        B : array<f16>;
                 @group(0) @binding(2) var<storage, read_write>  C : array<f16>;
 
-                const kColMajor : bool = false;  
-                const kStride   : u32  = 8u;     
+                const MAT_M  : u32 = ${MATRIX_M}u;
+                const MAT_N  : u32 = ${MATRIX_N}u;
+                const MAT_K  : u32 = ${MATRIX_K}u;
 
-                @compute @workgroup_size(64, 1, 1)
+                const SUB_M     : u32 = ${SUB_M}u;
+                const SUB_N     : u32 = ${SUB_N}u;
+                const SUB_K     : u32 = ${SUB_K}u;
+
+                @compute @workgroup_size(${WORKGROUP_SIZE_X}, ${WORKGROUP_SIZE_Y}, 1)
                 fn main(
-                    @builtin(global_invocation_id) gid : vec3<u32>,
+                    @builtin(local_invocation_id)  local_id   : vec3<u32>, // threadIdx
+                    @builtin(workgroup_id)         group_id   : vec3<u32>, // blockIdx
+                    @builtin(global_invocation_id) global_id  : vec3<u32>, 
                 ) {
-                    // auto idx =  blockIdx.x * blockDim.x + threadIdx.x; 
-                    var idx = gid.x * 8 + gid.y;
-
-                    const offset = 0;
-
-                    // var L = subgroupMatrixLoad<subgroup_matrix_left<f16, 8, 8>>(&A, offset, kColMajor, kStride);
-                    // var R = subgroupMatrixLoad<subgroup_matrix_right<f16, 8, 8>>(&B, offset, kColMajor, kStride);
-                    // var ACC : subgroup_matrix_result<f16, 8, 8>;
-
-                    // ACC = subgroupMatrixMultiplyAccumulate(L, R, ACC);
-
-                    // subgroupMatrixStore(&C, offset, ACC, kColMajor, kStride);
-
-
-                    //
+                    var idx = global_id.y * ${MATRIX_N} + global_id.x;
+                    
+                    var ACC : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                    
                     var tmp = A[0];
                     var tmp2 = B[0];
                     C[idx] = 6.0;
-
                 }
             `;
 
             log(computeShader);
 
-            const A = new Float16Array(8 * 8);
-            const B = new Float16Array(8 * 8);
-            const C = new Float16Array(8 * 8);
+            const A = new Float16Array(MATRIX_M * MATRIX_K);
+            const B = new Float16Array(MATRIX_K * MATRIX_N);
+            const C = new Float16Array(MATRIX_M * MATRIX_N);
 
-            for (let i = 0; i < 8 * 8; i++) {
+            for (let i = 0; i < MATRIX_M * MATRIX_K; i++) {
                 A[i] = i;
+            }
+
+            // Fill B as an identity matrix (size MATRIX_K x MATRIX_N)
+            for (let row = 0; row < MATRIX_K; row++) {
+                for (let col = 0; col < MATRIX_N; col++) {
+                    B[row * MATRIX_N + col] = (row === col) ? 1.0 : 0.0;
+                }
+            }
+
+            for (let i = 0; i < MATRIX_M * MATRIX_N; i++) {
                 C[i] = 0.0;
             }
 
-            // Fill B as an 8x8 identity matrix
-            for (let i = 0; i < 8; i++) {
-                for (let j = 0; j < 8; j++) {
-                    B[i * 8 + j] = (i === j) ? 1.0 : 0.0;
-                }
-            }
 
             const A_Buffer = device.createBuffer({
                 size: A.byteLength,
@@ -165,7 +205,12 @@
             computePass.setBindGroup(0, bindGroup);
 
             // Dispatch the compute shader
-            computePass.dispatchWorkgroups(1);
+
+            const gridX = Math.ceil(MATRIX_M / WORKGROUP_SIZE_X);
+            const gridY = Math.ceil(MATRIX_N / WORKGROUP_SIZE_Y);
+            log("gridX: " + gridX + ", gridY: " + gridY);
+
+            computePass.dispatchWorkgroups(gridX, gridY, 1);
             computePass.end();
 
             // Copy output to staging buffer for reading
@@ -201,7 +246,7 @@
             const resultsCopy = new Float16Array(results);
             stagingBuffer.unmap();
 
-            printMatrix(resultsCopy, 8, 8, true);
+            printMatrix(resultsCopy, MATRIX_M, MATRIX_N, true);
         }
 
         async function main() {
