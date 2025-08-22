@@ -213,6 +213,11 @@
                 let blockRow : u32 = wg_id.y * BLOCK_M;
                 let blockCol : u32 = wg_id.x * BLOCK_N;
 
+                // var acc00 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc01 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc10 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+                // var acc11 : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+
                 // e.g., a 2x2 accumulators
                 var acc : array<subgroup_matrix_result<f16, SUB_M, SUB_N>, TOTAL_HW_TILES>;
 
