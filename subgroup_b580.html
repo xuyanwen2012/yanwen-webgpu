@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>WebGPU Subgroup Matrix</title>
+</head>
+
+<body>
+    <pre id="output"></pre>
+
+    <script>
+        function log(...args) {
+            document.getElementById("output").textContent += args.join(" ") + "\n";
+        }
+
+        function printMatrix(A, rows, cols, verbose = false, padding = null) {
+            // Helper to pad a value to a string of given width
+            function padValue(val, width) {
+                let s = String(val);
+                if (width == null) return s;
+                // If val is a number, format to fixed decimals for alignment
+                if (typeof val === "number") {
+                    // Try to keep 4 significant digits for floats
+                    if (Number.isInteger(val)) {
+                        s = val.toString();
+                    } else {
+                        s = val.toFixed(3);
+                    }
+                }
+                // If it's an ellipsis, just center it
+                if (s === "...") {
+                    let left = Math.floor((width - 3) / 2);
+                    let right = width - 3 - left;
+                    return " ".repeat(left) + "..." + " ".repeat(right);
+                }
+                // Pad left for numbers, right for others
+                return s.padStart(width, " ");
+            }
+
+            if (verbose) {
+                // Print full matrix
+                for (let i = 0; i < rows; i++) {
+                    let row = [];
+                    for (let j = 0; j < cols; j++) {
+                        row.push(padValue(A[i * cols + j], padding));
+                    }
+                    log(row.join(" "));
+                }
+            } else {
+                // Print abbreviated matrix with ellipsis
+                for (let i = 0; i < rows; i++) {
+                    if (i < 3 || i > rows - 4) {
+                        let row = [];
+                        for (let j = 0; j < cols; j++) {
+                            if (j < 3 || j > cols - 4) {
+                                row.push(padValue(A[i * cols + j], padding));
+                            } else if (j === 3) {
+                                row.push(padValue("...", padding));
+                            }
+                        }
+                        log(row.join(" "));
+                    } else if (i === 3) {
+                        // Print a row of ellipsis, padded if needed
+                        let ellipsisRow = [];
+                        for (let j = 0; j < cols; j++) {
+                            if (j < 3 || j > cols - 4) {
+                                ellipsisRow.push(padValue("...", padding));
+                            } else if (j === 3) {
+                                ellipsisRow.push(padValue("...", padding));
+                            }
+                        }
+                        log(ellipsisRow.join(" "));
+                    }
+                }
+            }
+        }
+
+        // Problem size
+        const MATRIX_M = 8;
+        const MATRIX_N = 16;
+        const MATRIX_K = 16;
+
+        // HW tile shapes (must be subgroupMatrix supported sizes)
+        const SUB_M = 8;
+        const SUB_N = 16;
+        const SUB_K = 16;
+
+        // Workgroup size, how many threads to use per workgroup
+        // For Intel B580, the workgroup_size_x must be a multiple of the
+        // device maxSubgroupSize (32) when the shader uses a subgroup matrix.
+        // It seems like the warp size is 32
+        // so 4 warps per workgroup
+        const WORKGROUP_SIZE_X = 128;
+        const WORKGROUP_SIZE_Y = 1;
+
+        async function run(device) {
+            // ======================================================
+            // Available Tensor Core (MMA) Tile Shapes (subgroupMatrix)
+            // ======================================================
+            //
+            // For FP16 inputs:
+            //   - f16 x f16 -> f16   (M=8, N=16, K=16)
+            //   - f16 x f16 -> f32   (M=8, N=16, K=16)
+            //
+            // For INT8 inputs:
+            //   - i8  x i8  -> i32   (M=8, N=16, K=32)
+            //
+            // For UINT8 inputs:
+            //   - u8  x u8  -> u32   (M=8, N=16, K=32)
+            //
+            // ------------------------------------------------------
+            // Notes:
+            // - M = number of rows of the output tile
+            // - N = number of columns of the output tile
+            // - K = reduction dimension size
+            // - Result type determines accumulator precision
+            // ======================================================
+
+
+            // For Intel B580, the workgroup_size must be a multiple of the device maxSubgroupSize (32) 
+            // when the shader uses a subgroup matrix.
+
+            console.assert(WORKGROUP_SIZE_X % 32 === 0, "WORKGROUP_SIZE_X must be a multiple of 32");
+
+            const computeShader = `
+                enable chromium_experimental_subgroup_matrix;
+                enable f16;
+
+                @group(0) @binding(0) var<storage, read>        A : array<f16>;
+                @group(0) @binding(1) var<storage, read>        B : array<f16>;
+                @group(0) @binding(2) var<storage, read_write>  C : array<f16>;
+
+                const MAT_M  : u32 = ${MATRIX_M}u;
+                const MAT_N  : u32 = ${MATRIX_N}u;
+                const MAT_K  : u32 = ${MATRIX_K}u;
+
+                const K_STEP : u32 = 8u;
+
+                const SUB_M     : u32 = ${SUB_M}u;
+                const SUB_N     : u32 = ${SUB_N}u;
+                const SUB_K     : u32 = ${SUB_K}u;
+
+                const kColMajor : bool = false; // row-major layout
+
+                // Currently using 1D layout for C
+                @compute @workgroup_size(${WORKGROUP_SIZE_X}, ${WORKGROUP_SIZE_Y}, 1)
+                fn main(
+                    @builtin(local_invocation_id)  local_id   : vec3<u32>,
+                    @builtin(workgroup_id)         group_id   : vec3<u32>, 
+                    @builtin(global_invocation_id) global_id  : vec3<u32>, 
+                    @builtin(subgroup_id)          subgroup_id : u32,
+                ) {
+                    var ACC : subgroup_matrix_result<f16, SUB_M, SUB_N>;
+
+
+                    let L = subgroupMatrixLoad<subgroup_matrix_left<f16, SUB_M, SUB_K>>(&A, 0, kColMajor, K_STEP);
+                    let R = subgroupMatrixLoad<subgroup_matrix_right<f16, SUB_K, SUB_N>>(&B, 0, kColMajor, K_STEP);
+                    ACC = subgroupMatrixMultiplyAccumulate(L, R, ACC);
+
+                    // subgroupMatrixStore(&C, 0, ACC, kColMajor, K_STEP);
+                    
+                    var tmp = A[0];
+                    var tmp2 = B[0];
+                    C[global_id.x] = f16(subgroup_id);
+                }
+            `;
+
+            log(computeShader);
+
+            const A = new Float16Array(MATRIX_M * MATRIX_K);
+            const B = new Float16Array(MATRIX_K * MATRIX_N);
+            const C = new Float16Array(MATRIX_M * MATRIX_N);
+
+            for (let i = 0; i < MATRIX_M * MATRIX_K; i++) {
+                A[i] = i;
+            }
+
+            // Fill B as an identity matrix (size MATRIX_K x MATRIX_N)
+            for (let row = 0; row < MATRIX_K; row++) {
+                for (let col = 0; col < MATRIX_N; col++) {
+                    B[row * MATRIX_N + col] = (row === col) ? 1.0 : 0.0;
+                }
+            }
+
+            for (let i = 0; i < MATRIX_M * MATRIX_N; i++) {
+                C[i] = 0.0;
+            }
+
+
+            const A_Buffer = device.createBuffer({
+                size: A.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            const B_Buffer = device.createBuffer({
+                size: B.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            const C_Buffer = device.createBuffer({
+                size: C.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            });
+
+            // Create staging buffer for reading results
+            const stagingBuffer = device.createBuffer({
+                size: C.byteLength,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+
+            device.queue.writeBuffer(A_Buffer, 0, A);
+            device.queue.writeBuffer(B_Buffer, 0, B);
+
+            // Create compute pipeline
+            const computePipeline = device.createComputePipeline({
+                layout: "auto",
+                compute: {
+                    module: device.createShaderModule({
+                        code: computeShader,
+                    }),
+                    entryPoint: "main",
+                },
+            });
+
+            // Create bind group
+
+            const bindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    {
+                        binding: 0,
+                        resource: { buffer: A_Buffer },
+                    },
+                    {
+                        binding: 1,
+                        resource: { buffer: B_Buffer },
+                    },
+                    {
+                        binding: 2,
+                        resource: { buffer: C_Buffer },
+                    },
+                ],
+            });
+
+            // Create command encoder and compute pass
+            const commandEncoder = device.createCommandEncoder();
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, bindGroup);
+
+            // Dispatch the compute shader
+
+            // const gridX = Math.ceil(MATRIX_M / WORKGROUP_SIZE_X);
+            // const gridY = Math.ceil(MATRIX_N / WORKGROUP_SIZE_Y);
+            // log("gridX: " + gridX + ", gridY: " + gridY);
+
+            computePass.dispatchWorkgroups(1, 1, 1);
+            computePass.end();
+
+            // Copy output to staging buffer for reading
+            commandEncoder.copyBufferToBuffer(
+                C_Buffer,
+                0,
+                stagingBuffer,
+                0,
+                C.byteLength,
+            );
+
+            // Submit and wait for GPU execution
+            const commandBuffer = commandEncoder.finish();
+            device.queue.submit([commandBuffer]);
+
+            let start = performance.now();
+
+            await device.queue.onSubmittedWorkDone();
+
+            let end = performance.now();
+
+            log(
+                "Compute shader executed successfully on GPU! " +
+                (end - start) +
+                "ms",
+            );
+
+            // Map and read the results
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const results = new Float16Array(stagingBuffer.getMappedRange());
+
+            // Copy the data before unmapping to avoid detached ArrayBuffer
+            const resultsCopy = new Float16Array(results);
+            stagingBuffer.unmap();
+
+            printMatrix(resultsCopy, MATRIX_M, MATRIX_N, true, 3);
+        }
+
+        async function main() {
+            if (!navigator.gpu?.requestAdapter) {
+                log("WebGPU is NOT available in this browser.");
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                log("No GPU adapter found.");
+                return;
+            }
+
+            log("Adapter found: " + (adapter.info.description || "Unnamed GPU"));
+
+            const requiredFeatures = [
+                "chromium-experimental-subgroup-matrix",
+                "shader-f16",
+            ];
+
+            if (!requiredFeatures.every((f) => adapter.features.has(f))) {
+                log("Missing required features:", requiredFeatures.join(", "));
+                return;
+            }
+
+            const device = await adapter.requestDevice({ requiredFeatures });
+            log("Running...");
+            await run(device);
+        }
+
+        main();
+    </script>
+</body>
+
+</html>
