@@ -240,7 +240,7 @@ fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u3
                     @builtin(subgroup_id) s_id : u32,
                     @builtin(subgroup_size) s_size : u32,
                 ) {
-                    // Each thread computes THREAD_TILE_X_VALUE × THREAD_TILE_Y_VALUE elements
+                    // Each thread computes THREAD_TILE_X_VALUE x THREAD_TILE_Y_VALUE elements
                     for (var thread_tile_y = 0u; thread_tile_y < ${THREAD_TILE_Y_VALUE}u; thread_tile_y++) {
                         for (var thread_tile_x = 0u; thread_tile_x < ${THREAD_TILE_X_VALUE}u; thread_tile_x++) {
                             let i = get_global_id_y_tiled(local_id, w_id, thread_tile_y);
