@@ -240,27 +240,20 @@ fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u3
                     @builtin(subgroup_id) s_id : u32,
                     @builtin(subgroup_size) s_size : u32,
                 ) {
-                    let i = get_global_id_y(local_id, w_id);
-                    let j = get_global_id_x(local_id, w_id);
-                    let local_i = get_local_id_y(local_id);
-                    let local_j = get_local_id_x(local_id);
-
-                    // let i = local_id.y;
-                    // let j = local_id.x;
-                    // let local_i = local_id.y;
-                    // let local_j = local_id.x;
-
-
-
-                    // Write the result from the accumulator fragment back to global memory
+                    // Each thread computes THREAD_TILE_X_VALUE × THREAD_TILE_Y_VALUE elements
+                    for (var thread_tile_y = 0u; thread_tile_y < ${THREAD_TILE_Y_VALUE}u; thread_tile_y++) {
+                        for (var thread_tile_x = 0u; thread_tile_x < ${THREAD_TILE_X_VALUE}u; thread_tile_x++) {
+                            let i = get_global_id_y_tiled(local_id, w_id, thread_tile_y);
+                            let j = get_global_id_x_tiled(local_id, w_id, thread_tile_x);
+                            
+                            // Check bounds
+                            if (i < ${n_VALUE}u && j < ${n_VALUE}u) {
+                                C[index2D(i, j, ${n_VALUE})] = 9;
+                            }
+                        }
+                    }
                     var tmp = A[0];
                     var tmp2 = B[0];
-
-                    C[index2D(
-                        i,
-                        j,
-                        ${n_VALUE}
-                    )] = 9;
                 }
             `;
 
