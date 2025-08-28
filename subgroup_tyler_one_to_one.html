@@ -78,7 +78,6 @@
 
         // Problem size
         const n_VALUE = 2048;
-        // const n_VALUE = 128;
         const A_LEN = n_VALUE * n_VALUE;
         const B_LEN = n_VALUE * n_VALUE;
         const C_LEN = n_VALUE * n_VALUE;
@@ -92,27 +91,46 @@
         const TUNE_SPLIT_VALUE = 32;
 
         // Warp reshape (lane grid inside a warp)
+        // For NVIDIA, Intel GPU, warp is 32
+        // MacOS is 64
         const WARP_SIZE = 32;
         const WARP_SHAPE_X_VALUE = 4;
         const WARP_SHAPE_Y_VALUE = WARP_SIZE / WARP_SHAPE_X_VALUE;
 
-        // Per-thread register tile
+        // 
         const THREAD_TILE_X_VALUE = 2;
         const THREAD_TILE_Y_VALUE = 4;
 
-        // Per-warp fragment replication
-        const WARP_TILE_X_VALUE = 8;
-        const WARP_TILE_Y_VALUE = 4;
+        // Per-warp fragment replication (was not used in Tyler's code)
+        // const WARP_TILE_X_VALUE = 8;
+        // const WARP_TILE_Y_VALUE = 4;
 
         // Subgroup (cooperative) matrix base tile used by the WGSL intrinsics
-        const TENSOR_M = 16;
+        // According the specs:
+        // 
+        // subgroup_matrix_left<T, K, M> --- M rows x K cols
+        // subgroup_matrix_right<T, N, K> --- K rows x N cols  
+        // subgroup_matrix_result<T, N, M> --- N rows x M cols
+        // 
+        // result (M, N) = A (M, K) * B (K, N)        
+        //
+        const TENSOR_M = 8;
         const TENSOR_N = 16;
         const TENSOR_K = 16;
-
 
         // Derived per-workgroup output coverage (block tile size)
         const THREADS_X_DIM = THREADS_X_VALUE * THREAD_TILE_X_VALUE; // 8*2 = 16
         const THREADS_Y_DIM = THREADS_Y_VALUE * THREAD_TILE_Y_VALUE; // 16*4 = 64
+
+        // THREADS_X_DIM must be multiple of TENSOR_N
+        // THREADS_Y_DIM must be multiple of TENSOR_M
+        // TUNE_SPLIT_VALUE must >= TENSOR_K
+
+        // WARP_SHAPE_X_VALUE * THREAD_TILE_X_VALUE == TENSOR_N
+        // WARP_SHAPE_Y_VALUE * THREAD_TILE_Y_VALUE == TENSOR_M
+
+        // WARP_SHAPE_Y_VALUE > THREADS_Y_VALUE
+        // WARP_SHAPE_X_VALUE > THREADS_X_VALUE
 
         // #define mk_gridDim(variable_name)                                              \
         // dim3 variable_name(n / THREADS_X_DIM, n / THREADS_Y_DIM)
@@ -315,9 +333,16 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
                     let local_i: u32 = get_local_id_y(local_id);
                     let local_j: u32 = get_local_id_x(local_id);
 
-                    var a_frag : subgroup_matrix_left<f16, ${TENSOR_M}, ${TENSOR_K}>;
-                    var b_frag : subgroup_matrix_right<f16, ${TENSOR_K}, ${TENSOR_N}>;
-                    var acc_frag : subgroup_matrix_result<f16, ${TENSOR_M}, ${TENSOR_N}>;
+        // subgroup_matrix_left<T, K, M> --- M rows x K cols
+        // subgroup_matrix_right<T, N, K> --- K rows x N cols  
+        // subgroup_matrix_result<T, N, M> --- N rows x M cols
+                    // var a_frag : subgroup_matrix_left<f16, ${TENSOR_M}, ${TENSOR_K}>;
+                    // var b_frag : subgroup_matrix_right<f16, ${TENSOR_K}, ${TENSOR_N}>;
+                    // var acc_frag : subgroup_matrix_result<f16, ${TENSOR_M}, ${TENSOR_N}>;
+
+                    var a_frag : subgroup_matrix_left<f16, ${TENSOR_K}, ${TENSOR_M}>;
+                    var b_frag : subgroup_matrix_right<f16, ${TENSOR_N}, ${TENSOR_K}>;
+                    var acc_frag : subgroup_matrix_result<f16, ${TENSOR_N}, ${TENSOR_M}>;
 
                     for (var k_outer: u32 = 0u; k_outer < ${n_VALUE}; k_outer = k_outer + ${TUNE_SPLIT_VALUE}) {
                     
@@ -340,7 +365,7 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
                                 k_inner, 
                                 ${TUNE_SPLIT_VALUE}
                             );
-                            a_frag = subgroupMatrixLoad<subgroup_matrix_left<f16, ${TENSOR_M}, ${TENSOR_K}>>(&A_shared, A_local_warp_tile, kColMajor, ${TUNE_SPLIT_VALUE});
+                            a_frag = subgroupMatrixLoad<subgroup_matrix_left<f16, ${TENSOR_K}, ${TENSOR_M}>>(&A_shared, A_local_warp_tile, kColMajor, ${TUNE_SPLIT_VALUE});
                             
 
                             // __half *B_local_warp_tile =
@@ -357,7 +382,7 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
                                 get_local_warp_tile_x(local_id),
                                 ${THREADS_X_DIM}
                             );
-                            b_frag = subgroupMatrixLoad<subgroup_matrix_right<f16, ${TENSOR_K}, ${TENSOR_N}>>(&B_shared, B_local_warp_tile, kColMajor, ${THREADS_X_DIM});
+                            b_frag = subgroupMatrixLoad<subgroup_matrix_right<f16, ${TENSOR_N}, ${TENSOR_K}>>(&B_shared, B_local_warp_tile, kColMajor, ${THREADS_X_DIM});
 
                              // Perform the matrix multiply-accumulate on the fragments
                             acc_frag = subgroupMatrixMultiplyAccumulate(a_frag, b_frag, acc_frag);
