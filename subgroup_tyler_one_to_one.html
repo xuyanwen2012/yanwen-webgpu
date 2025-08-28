@@ -200,7 +200,7 @@
                 diagnostic(off, chromium.subgroup_matrix_uniformity);
                 
                 enable chromium_experimental_subgroup_matrix;
-                enable subgroups;
+                // enable subgroups;
                 enable f16;
 
                 @group(0) @binding(0) var<storage, read>       A : array<f16>;
@@ -326,19 +326,12 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
                     @builtin(workgroup_id) w_id : vec3<u32>,
                     @builtin(global_invocation_id) global_id : vec3<u32>,
                     @builtin(subgroup_id) s_id : u32,
-                    @builtin(subgroup_size) s_size : u32,
+                    // @builtin(subgroup_size) s_size : u32,
                 ) {
                     let i: u32 = get_global_id_y(local_id, w_id);
                     let j: u32 = get_global_id_x(local_id, w_id);
                     let local_i: u32 = get_local_id_y(local_id);
                     let local_j: u32 = get_local_id_x(local_id);
-
-        // subgroup_matrix_left<T, K, M> --- M rows x K cols
-        // subgroup_matrix_right<T, N, K> --- K rows x N cols  
-        // subgroup_matrix_result<T, N, M> --- N rows x M cols
-                    // var a_frag : subgroup_matrix_left<f16, ${TENSOR_M}, ${TENSOR_K}>;
-                    // var b_frag : subgroup_matrix_right<f16, ${TENSOR_K}, ${TENSOR_N}>;
-                    // var acc_frag : subgroup_matrix_result<f16, ${TENSOR_M}, ${TENSOR_N}>;
 
                     var a_frag : subgroup_matrix_left<f16, ${TENSOR_K}, ${TENSOR_M}>;
                     var b_frag : subgroup_matrix_right<f16, ${TENSOR_N}, ${TENSOR_K}>;
@@ -350,39 +343,31 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
                         
                         for (var k_inner: u32 = 0u; k_inner < ${TUNE_SPLIT_VALUE}; k_inner = k_inner + ${TENSOR_K}) {
 
-                            // Load A tile (Original CUDA code)
-                            // 
-                            // __half *A_local_warp_tile = &(A_shared[index2D(
-                            //     get_local_warp_tile_y(),     // row offset of this warp's tile in A_shared
-                            //     k_inner,                     // column offset in A_shared
-                            //     ${TUNE_SPLIT_VALUE}          // stride of A_shared
-                            // )]);
-                            // wmma::load_matrix_sync(a_frag, A_local_warp_tile, TUNE_SPLIT_VALUE);
-                           
                             // Load A tile
                             let A_local_warp_tile = index2D(
-                                get_local_warp_tile_y(local_id), 
-                                k_inner, 
+                                get_local_warp_tile_y(local_id),    // row offset of this warp's tile in A_shared
+                                k_inner,                            // column offset in A_shared
+                                ${TUNE_SPLIT_VALUE}                 // stride of A_shared
+                            );
+                            a_frag = subgroupMatrixLoad<subgroup_matrix_left<f16, ${TENSOR_K}, ${TENSOR_M}>>(
+                                &A_shared, 
+                                A_local_warp_tile, 
+                                kColMajor, 
                                 ${TUNE_SPLIT_VALUE}
                             );
-                            a_frag = subgroupMatrixLoad<subgroup_matrix_left<f16, ${TENSOR_K}, ${TENSOR_M}>>(&A_shared, A_local_warp_tile, kColMajor, ${TUNE_SPLIT_VALUE});
                             
-
-                            // __half *B_local_warp_tile =
-                            //     &(B_shared[index2D(k_inner,                  // row offset in B_shared
-                            //                         get_local_warp_tile_x(), // column offset of this
-                            //                                                  // warp's tile in B_shared
-                            //                         THREADS_X_DIM            // stride of B_shared
-                            //                         )]);
-                            // wmma::load_matrix_sync(b_frag, B_local_warp_tile, THREADS_X_DIM);
-
                             // Load B tile
                             let B_local_warp_tile = index2D(
                                 k_inner,
                                 get_local_warp_tile_x(local_id),
                                 ${THREADS_X_DIM}
                             );
-                            b_frag = subgroupMatrixLoad<subgroup_matrix_right<f16, ${TENSOR_N}, ${TENSOR_K}>>(&B_shared, B_local_warp_tile, kColMajor, ${THREADS_X_DIM});
+                            b_frag = subgroupMatrixLoad<subgroup_matrix_right<f16, ${TENSOR_N}, ${TENSOR_K}>>(
+                                &B_shared, 
+                                B_local_warp_tile, 
+                                kColMajor, 
+                                ${THREADS_X_DIM}
+                            );
 
                              // Perform the matrix multiply-accumulate on the fragments
                             acc_frag = subgroupMatrixMultiplyAccumulate(a_frag, b_frag, acc_frag);
@@ -393,25 +378,14 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
                         workgroupBarrier();
                     }
 
-                    //   __half *C_global_warp_tile = &(C[index2D(
-                    //       get_global_warp_tile_y(), // row offset of this warp's tile in C
-                    //       get_global_warp_tile_x(), // column offset of this warp's tile in C
-                    //       n                         // global leading dimension of C
-                    //       )]);
-                    //   wmma::store_matrix_sync(C_global_warp_tile, acc_frag, n, wmma::mem_row_major);
-
                     // Write the result from the accumulator fragment back to global memory                    
                     let C_global_warp_tile = index2D(
-                        get_global_warp_tile_y(local_id, w_id),
-                        get_global_warp_tile_x(local_id, w_id),
-                        ${n_VALUE}
+                        get_global_warp_tile_y(local_id, w_id), // row offset of this warp's tile in C
+                        get_global_warp_tile_x(local_id, w_id), // column offset of this warp's tile in C
+                        ${n_VALUE}                              // global leading dimension of C
                     );
                     subgroupMatrixStore(&C, C_global_warp_tile, acc_frag, kColMajor, ${n_VALUE});
 
-
-                    var tmp = A[0];
-                    var tmp2 = B[0];
-                    var tmp3 = C[0];
                 }
             `;
 
@@ -560,7 +534,7 @@ fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3
             const requiredFeatures = [
                 "chromium-experimental-subgroup-matrix",
                 "shader-f16",
-                "subgroups",
+                // "subgroups",
             ];
 
             if (!requiredFeatures.every((f) => adapter.features.has(f))) {
