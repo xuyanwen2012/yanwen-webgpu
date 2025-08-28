@@ -77,8 +77,8 @@
         }
 
         // Problem size
-        const n_VALUE = 2048;
-        // const n_VALUE = 128;
+        // const n_VALUE = 2048;
+        const n_VALUE = 128;
         const A_LEN = n_VALUE * n_VALUE;
         const B_LEN = n_VALUE * n_VALUE;
         const C_LEN = n_VALUE * n_VALUE;
@@ -104,18 +104,17 @@
         const WARP_TILE_X_VALUE = 8;
         const WARP_TILE_Y_VALUE = 4;
 
-        // Subgroup (cooperative) matrix base tile used by the WGSL intrinsics
-        const TENSOR_M = 16;
-        const TENSOR_N = 16;
-        const TENSOR_K = 16;
+        // // Subgroup (cooperative) matrix base tile used by the WGSL intrinsics
+        const TENSOR_M = 8;
+        const TENSOR_N = 8;
+        const TENSOR_K = 8;
 
 
         // Derived per-workgroup output coverage (block tile size)
         const THREADS_X_DIM = THREADS_X_VALUE * THREAD_TILE_X_VALUE; // 8*2 = 16
         const THREADS_Y_DIM = THREADS_Y_VALUE * THREAD_TILE_Y_VALUE; // 16*4 = 64
 
-        // #define mk_gridDim(variable_name)                                              \
-        // dim3 variable_name(n / THREADS_X_DIM, n / THREADS_Y_DIM)
+        // fn mk_gridDim(n: u32) -> vec2<u32> { return vec2<u32>(n / ${THREADS_X_DIM}, n / ${THREADS_Y_DIM}); }
         class GridDim {
             constructor(x, y) {
                 this.x = x;
@@ -180,7 +179,6 @@
 
             const computeShader = `
                 enable chromium_experimental_subgroup_matrix;
-                enable subgroups;
                 enable f16;
 
                 @group(0) @binding(0) var<storage, read>       A : array<f16>;
@@ -201,6 +199,12 @@ fn get_global_id_y(local_id: vec3<u32>, w_id: vec3<u32>) -> u32 { return (get_bl
 fn get_flattened_dim() -> u32 { return ${THREADS_X_VALUE} * ${THREADS_Y_VALUE}; }
 fn get_flattened_id(local_id: vec3<u32>) -> u32 { return local_id.x; }
 
+// ---------------- GridDim theme ----------------
+// fn mk_gridDim(n: u32) -> vec2<u32> { return vec2<u32>(n / ${THREADS_X_DIM}, n / ${THREADS_Y_DIM}); }
+
+// ---------------- Thread tiling dimensions ----------------
+// const THREADS_X_DIM: u32 = ${THREADS_X_VALUE} * ${THREAD_TILE_X_VALUE};
+// const THREADS_Y_DIM: u32 = ${THREADS_Y_VALUE} * ${THREAD_TILE_Y_VALUE};
 
 // ---------------- Indexing ----------------
 fn index2D(i: u32, j: u32, n: u32) -> u32 { return i * n + j; }
@@ -209,7 +213,13 @@ fn index2D(i: u32, j: u32, n: u32) -> u32 { return i * n + j; }
 fn get_global_block_tile_y(w_id: vec3<u32>) -> u32 { return get_block_id_y(w_id) * ${THREADS_Y_DIM}; }
 fn get_global_block_tile_x(w_id: vec3<u32>) -> u32 { return get_block_id_x(w_id) * ${THREADS_X_DIM}; }
 
+// ---------------- Dynamic shared memory ----------------
+// const A_SHARED_SIZE: u32 = ${THREADS_Y_DIM} * ${TUNE_SPLIT_VALUE};
+// const B_SHARED_SIZE: u32 = ${TUNE_SPLIT_VALUE} * ${THREADS_X_DIM};
+
 // ---------------- Warp reshaping ----------------
+// const WARP_SHAPE_Y_VALUE: u32 = 32u / ${WARP_SHAPE_X_VALUE};
+
 fn get_lane_id(local_id: vec3<u32>) -> u32 { return local_id.x % ${WARP_SIZE}; }
 fn get_lane_id_x(local_id: vec3<u32>) -> u32 { return get_lane_id(local_id) % ${WARP_SHAPE_X_VALUE}; }
 fn get_lane_id_y(local_id: vec3<u32>) -> u32 { return get_lane_id(local_id) / ${WARP_SHAPE_X_VALUE}; }
@@ -231,36 +241,30 @@ fn get_local_id_y_tiled(local_id: vec3<u32>, thread_tile_y: u32) -> u32 { return
 fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u32) -> u32 { return get_global_block_tile_y(w_id) + get_local_id_y_tiled(local_id, thread_tile_y); }
 
 
-                // Change block dimensions to a 1D launch
-                @compute @workgroup_size(${THREADS_X_VALUE} * ${THREADS_Y_VALUE}, 1, 1)
+                @compute @workgroup_size(${THREADS_X_VALUE}, ${THREADS_Y_VALUE}, 1)
                 fn main(
                     @builtin(local_invocation_id) local_id : vec3<u32>,
                     @builtin(workgroup_id) w_id : vec3<u32>,
                     @builtin(global_invocation_id) global_id : vec3<u32>,
                     @builtin(subgroup_id) s_id : u32,
-                    @builtin(subgroup_size) s_size : u32,
                 ) {
                     let i = get_global_id_y(local_id, w_id);
                     let j = get_global_id_x(local_id, w_id);
                     let local_i = get_local_id_y(local_id);
                     let local_j = get_local_id_x(local_id);
 
-                    // let i = local_id.y;
-                    // let j = local_id.x;
-                    // let local_i = local_id.y;
-                    // let local_j = local_id.x;
-
 
 
                     // Write the result from the accumulator fragment back to global memory
                     var tmp = A[0];
                     var tmp2 = B[0];
+                    // C[index2D(i, j, ${n_VALUE})] = 9;
 
                     C[index2D(
-                        i,
-                        j,
+                        get_global_warp_tile_y(local_id, w_id),
+                        get_global_warp_tile_x(local_id, w_id),
                         ${n_VALUE}
-                    )] = 9;
+                    )] = f16(9);
                 }
             `;
 
@@ -389,7 +393,7 @@ fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u3
             const resultsCopy = new Float16Array(results);
             stagingBuffer.unmap();
 
-            printMatrix(resultsCopy, n_VALUE, n_VALUE, false, 3);
+            printMatrix(resultsCopy, n_VALUE, n_VALUE, true, 3);
         }
 
         async function main() {
@@ -409,7 +413,6 @@ fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u3
             const requiredFeatures = [
                 "chromium-experimental-subgroup-matrix",
                 "shader-f16",
-                "subgroups",
             ];
 
             if (!requiredFeatures.every((f) => adapter.features.has(f))) {
