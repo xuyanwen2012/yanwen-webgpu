@@ -179,6 +179,8 @@
 
 
             const computeShader = `
+                diagnostic(off, chromium.subgroup_matrix_uniformity);
+                
                 enable chromium_experimental_subgroup_matrix;
                 enable subgroups;
                 enable f16;
@@ -230,6 +232,74 @@ fn get_global_id_x_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_x: u3
 fn get_local_id_y_tiled(local_id: vec3<u32>, thread_tile_y: u32) -> u32 { return get_local_id_y(local_id) * ${THREAD_TILE_Y_VALUE} + thread_tile_y; }
 fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u32) -> u32 { return get_global_block_tile_y(w_id) + get_local_id_y_tiled(local_id, thread_tile_y); }
 
+    
+    const kColMajor = false;
+    
+
+var<workgroup> A_shared : array<f16, ${A_SHARED_SIZE}>;
+var<workgroup> B_shared : array<f16, ${B_SHARED_SIZE}>;
+
+
+// Cooperative, strided load of one tile of A and B from global into workgroup.
+// Reads/writes A_shared/B_shared directly (cannot pass workgroup arrays as params).
+fn load_shared_memory_tile(k_outer: u32, n: u32, local_id: vec3<u32>, w_id: vec3<u32>) {
+  let T        = get_flattened_dim();
+  let tid      = get_flattened_id(local_id);
+
+  // ---- A tile geometry & addressing ----
+  let A_rows : u32         = ${THREADS_Y_DIM};
+  let A_cols : u32         = ${TUNE_SPLIT_VALUE};
+  let A_ld_shared : u32    = A_cols;                        // leading dim of A_shared
+  let A_tile_row0 : u32    = get_global_block_tile_y(w_id); // global row origin of A tile
+  let A_tile_col0 : u32    = k_outer;                       // global col origin of A tile
+
+  // ---- B tile geometry & addressing ----
+  let B_rows : u32         = ${TUNE_SPLIT_VALUE};
+  let B_cols : u32         = ${THREADS_X_DIM};
+  let B_ld_shared : u32    = B_cols;                        // leading dim of B_shared
+  let B_tile_row0 : u32    = k_outer;                       // global row origin of B tile
+  let B_tile_col0 : u32    = get_global_block_tile_x(w_id); // global col origin of B tile
+
+  // ---- Cooperative copy: A (row-major logical) ----
+  let A_elems = A_rows * A_cols;
+  var e = tid;
+  while (e < A_elems) {
+    let i = e / A_cols;          // 0..A_rows-1
+    let j = e % A_cols;          // 0..A_cols-1
+    
+    // Global index in A (source is NxN laid out row-major as array<f16>)
+    let g_row = A_tile_row0 + i;
+    let g_col = A_tile_col0 + j;
+    let g_idx = index2D(g_row, g_col, n);
+
+    // Shared index (with padding in leading dim)
+    let s_idx = index2D(i, j, A_ld_shared);
+    A_shared[s_idx] = A[g_idx];
+    e += T;
+  }
+
+  // ---- Cooperative copy: B ----
+  let B_elems = B_rows * B_cols;
+  e = tid;
+  while (e < B_elems) {
+    let i = e / B_cols;          // 0..B_rows-1
+    let j = e % B_cols;          // 0..B_cols-1
+    
+    // Global index in B
+    let g_row = B_tile_row0 + i;
+    let g_col = B_tile_col0 + j;
+    let g_idx = index2D(g_row, g_col, n);
+
+    // Shared index
+    let s_idx = index2D(i, j, B_ld_shared);
+    B_shared[s_idx] = B[g_idx];
+    e += T;
+  }
+
+  workgroupBarrier(); // ensure tiles are resident before MMA
+}
+
+
 
                 // Change block dimensions to a 1D launch
                 @compute @workgroup_size(${THREADS_X_VALUE} * ${THREADS_Y_VALUE}, 1, 1)
@@ -240,20 +310,83 @@ fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u3
                     @builtin(subgroup_id) s_id : u32,
                     @builtin(subgroup_size) s_size : u32,
                 ) {
-                    // Each thread computes THREAD_TILE_X_VALUE x THREAD_TILE_Y_VALUE elements
-                    for (var thread_tile_y = 0u; thread_tile_y < ${THREAD_TILE_Y_VALUE}u; thread_tile_y++) {
-                        for (var thread_tile_x = 0u; thread_tile_x < ${THREAD_TILE_X_VALUE}u; thread_tile_x++) {
-                            let i = get_global_id_y_tiled(local_id, w_id, thread_tile_y);
-                            let j = get_global_id_x_tiled(local_id, w_id, thread_tile_x);
+                    let i: u32 = get_global_id_y(local_id, w_id);
+                    let j: u32 = get_global_id_x(local_id, w_id);
+                    let local_i: u32 = get_local_id_y(local_id);
+                    let local_j: u32 = get_local_id_x(local_id);
+
+                    var a_frag : subgroup_matrix_left<f16, ${TENSOR_M}, ${TENSOR_K}>;
+                    var b_frag : subgroup_matrix_right<f16, ${TENSOR_K}, ${TENSOR_N}>;
+                    var acc_frag : subgroup_matrix_result<f16, ${TENSOR_M}, ${TENSOR_N}>;
+
+                    for (var k_outer: u32 = 0u; k_outer < ${n_VALUE}; k_outer = k_outer + ${TUNE_SPLIT_VALUE}) {
+                    
+                        load_shared_memory_tile(k_outer, ${n_VALUE}, local_id, w_id);
+                        
+                        for (var k_inner: u32 = 0u; k_inner < ${TUNE_SPLIT_VALUE}; k_inner = k_inner + ${TENSOR_K}) {
+
+                            // Load A tile (Original CUDA code)
+                            // 
+                            // __half *A_local_warp_tile = &(A_shared[index2D(
+                            //     get_local_warp_tile_y(),     // row offset of this warp's tile in A_shared
+                            //     k_inner,                     // column offset in A_shared
+                            //     ${TUNE_SPLIT_VALUE}          // stride of A_shared
+                            // )]);
+                            // wmma::load_matrix_sync(a_frag, A_local_warp_tile, TUNE_SPLIT_VALUE);
+                           
+                            // Load A tile
+                            let A_local_warp_tile = index2D(
+                                get_local_warp_tile_y(local_id), 
+                                k_inner, 
+                                ${TUNE_SPLIT_VALUE}
+                            );
+                            a_frag = subgroupMatrixLoad<subgroup_matrix_left<f16, ${TENSOR_M}, ${TENSOR_K}>>(&A_shared, A_local_warp_tile, kColMajor, ${TUNE_SPLIT_VALUE});
                             
-                            // Check bounds
-                            if (i < ${n_VALUE}u && j < ${n_VALUE}u) {
-                                C[index2D(i, j, ${n_VALUE})] = 9;
-                            }
+
+                            // __half *B_local_warp_tile =
+                            //     &(B_shared[index2D(k_inner,                  // row offset in B_shared
+                            //                         get_local_warp_tile_x(), // column offset of this
+                            //                                                  // warp's tile in B_shared
+                            //                         THREADS_X_DIM            // stride of B_shared
+                            //                         )]);
+                            // wmma::load_matrix_sync(b_frag, B_local_warp_tile, THREADS_X_DIM);
+
+                            // Load B tile
+                            let B_local_warp_tile = index2D(
+                                k_inner,
+                                get_local_warp_tile_x(local_id),
+                                ${THREADS_X_DIM}
+                            );
+                            b_frag = subgroupMatrixLoad<subgroup_matrix_right<f16, ${TENSOR_K}, ${TENSOR_N}>>(&B_shared, B_local_warp_tile, kColMajor, ${THREADS_X_DIM});
+
+                             // Perform the matrix multiply-accumulate on the fragments
+                            acc_frag = subgroupMatrixMultiplyAccumulate(a_frag, b_frag, acc_frag);
                         }
+
+                        // End of process shared memory tile phase
+                        
+                        workgroupBarrier();
                     }
+
+                    //   __half *C_global_warp_tile = &(C[index2D(
+                    //       get_global_warp_tile_y(), // row offset of this warp's tile in C
+                    //       get_global_warp_tile_x(), // column offset of this warp's tile in C
+                    //       n                         // global leading dimension of C
+                    //       )]);
+                    //   wmma::store_matrix_sync(C_global_warp_tile, acc_frag, n, wmma::mem_row_major);
+
+                    // Write the result from the accumulator fragment back to global memory                    
+                    let C_global_warp_tile = index2D(
+                        get_global_warp_tile_y(local_id, w_id),
+                        get_global_warp_tile_x(local_id, w_id),
+                        ${n_VALUE}
+                    );
+                    subgroupMatrixStore(&C, C_global_warp_tile, acc_frag, kColMajor, ${n_VALUE});
+
+
                     var tmp = A[0];
                     var tmp2 = B[0];
+                    var tmp3 = C[0];
                 }
             `;
 
@@ -264,7 +397,7 @@ fn get_global_id_y_tiled(local_id: vec3<u32>, w_id: vec3<u32>, thread_tile_y: u3
             const C = new Float16Array(C_LEN);
 
             for (let i = 0; i < A_LEN; i++) {
-                A[i] = i;
+                A[i] = 1;
             }
 
             // Fill B as an identity matrix (size MATRIX_K x MATRIX_N)
